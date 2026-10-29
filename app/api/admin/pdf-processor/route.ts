@@ -24,6 +24,22 @@ export interface ServerProcessedPage {
   sizeKb: number;
 }
 
+export interface PdfJobStatus {
+  jobId: string;
+  status: 'processing' | 'completed' | 'failed';
+  phase: string;
+  fileName: string;
+  completedPages: number;
+  totalPages: number;
+  totalSizeKb: number;
+  pages: ServerProcessedPage[];
+  error?: string;
+  updatedAt: number;
+}
+
+// In-memory job tracker paired with disk persistence in /tmp
+const activeJobs = new Map<string, PdfJobStatus>();
+
 function sanitizeId(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80) || `job_${Date.now()}`;
 }
@@ -32,6 +48,38 @@ function ensureDir(dirPath: string) {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true });
   }
+}
+
+function getStatusFilePath(safeJobId: string): string {
+  const dir = path.join(TMP_UPLOAD_ROOT, safeJobId);
+  ensureDir(dir);
+  return path.join(dir, 'status.json');
+}
+
+function saveJobStatus(state: PdfJobStatus) {
+  state.updatedAt = Date.now();
+  activeJobs.set(state.jobId, state);
+  try {
+    fs.writeFileSync(getStatusFilePath(state.jobId), JSON.stringify(state));
+  } catch {
+    // Ignore non-fatal status write errors
+  }
+}
+
+function loadJobStatus(safeJobId: string): PdfJobStatus | null {
+  const mem = activeJobs.get(safeJobId);
+  if (mem) return mem;
+  try {
+    const statusFile = getStatusFilePath(safeJobId);
+    if (fs.existsSync(statusFile)) {
+      const parsed = JSON.parse(fs.readFileSync(statusFile, 'utf8')) as PdfJobStatus;
+      activeJobs.set(safeJobId, parsed);
+      return parsed;
+    }
+  } catch {
+    // Ignore parse error
+  }
+  return null;
 }
 
 function saveWebpPageToStorage(jobId: string, fileName: string, buffer: Buffer): string {
@@ -71,11 +119,7 @@ function saveWebpPageToStorage(jobId: string, fileName: string, buffer: Buffer):
 
 /**
  * Converts an input image (file path or buffer) into 1 or more high-definition
- * full-width WebP panels without EVER shrinking width due to tall Webtoon strip height.
- *
- * If the image is a tall vertical Webtoon strip (e.g. 1080 x 15000), it keeps 100% of
- * its HD width (up to 1280px wide) and slices vertically into seamless segments that
- * stay under mobile GPU texture limits (3600px) and WebP's 16383px height cap.
+ * full-width WebP panels without shrinking width due to tall Webtoon strip height.
  */
 async function convertPageToHdWebpSlices(params: {
   source: string | Buffer;
@@ -94,25 +138,20 @@ async function convertPageToHdWebpSlices(params: {
   const origWidth = meta.width || 1080;
   const origHeight = meta.height || 1600;
 
-  // Only constrain width (NEVER constrain height so tall Webtoon strips keep full HD width!)
   const targetWidth = Math.min(origWidth, TARGET_MAX_WIDTH);
   const widthScale = targetWidth / origWidth;
   const scaledHeight = Math.max(1, Math.round(origHeight * widthScale));
 
-  // Determine how many vertical slices to split this page into:
-  // - Standard manga/comic page (scaledHeight <= 3800): 1 slice
-  // - Tall webtoon strip (e.g. 1080 x 15000): split into seamless vertical slices
   let numSlices = 1;
   if (scaledHeight > 3800 && maxSlicesForThisPage > 1) {
     const idealCount = Math.ceil(scaledHeight / IDEAL_SLICE_HEIGHT);
     numSlices = Math.min(maxSlicesForThisPage, idealCount);
   }
-  // Ensure each slice stays below WebP's 16,383px hardware encoder limit
   while (Math.ceil(scaledHeight / numSlices) > WEBP_MAX_HEIGHT) {
     numSlices++;
   }
 
-  // If only 1 slice is needed, resize by width only and encode at HD quality 92
+  // Fast path: 1 slice
   if (numSlices === 1) {
     const outIdx = startPageCounter;
     const padded = String(outIdx).padStart(3, '0');
@@ -124,9 +163,9 @@ async function convertPageToHdWebpSlices(params: {
         withoutEnlargement: true,
       })
       .webp({
-        quality: 92,
+        quality: 90,
         smartSubsample: true,
-        effort: 4,
+        effort: 2,
       })
       .toBuffer();
 
@@ -146,44 +185,93 @@ async function convertPageToHdWebpSlices(params: {
     };
   }
 
-  // For multi-slice tall Webtoon strips: resize width once to lossless raw/PNG buffer, then extract slices
-  const resizedPngBuffer = await sharp(source, { limitInputPixels: false })
-    .resize({
-      width: targetWidth,
-      withoutEnlargement: true,
-    })
-    .png({ compressionLevel: 1 })
-    .toBuffer();
-
-  const resizedMeta = await sharp(resizedPngBuffer, { limitInputPixels: false }).metadata();
-  const actualW = resizedMeta.width || targetWidth;
-  const actualH = resizedMeta.height || scaledHeight;
-  const sliceHeight = Math.ceil(actualH / numSlices);
-
+  // Multi-slice tall Webtoon strip: use raw pixel buffer when under 35MP for O(1) instant slicing
+  const totalPixels = targetWidth * scaledHeight;
   const slices: ServerProcessedPage[] = [];
   let totalSizeKb = 0;
 
+  if (totalPixels <= 35_000_000) {
+    const { data: rawBuffer, info } = await sharp(source, { limitInputPixels: false })
+      .resize({
+        width: targetWidth,
+        withoutEnlargement: true,
+      })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const actualW = info.width;
+    const actualH = info.height;
+    const channels = info.channels;
+    const rowBytes = actualW * channels;
+    const sliceHeight = Math.ceil(actualH / numSlices);
+
+    for (let s = 0; s < numSlices; s++) {
+      const top = s * sliceHeight;
+      if (top >= actualH) break;
+      const height = Math.min(sliceHeight, actualH - top);
+      if (height <= 0) break;
+
+      const outIdx = startPageCounter + slices.length;
+      const padded = String(outIdx).padStart(3, '0');
+      const outWebpName = `page-${padded}.webp`;
+
+      const byteStart = top * rowBytes;
+      const byteEnd = (top + height) * rowBytes;
+      const sliceRaw = rawBuffer.subarray(byteStart, byteEnd);
+
+      const webpBuffer = await sharp(sliceRaw, {
+        raw: { width: actualW, height, channels },
+        limitInputPixels: false,
+      })
+        .webp({
+          quality: 90,
+          smartSubsample: true,
+          effort: 2,
+        })
+        .toBuffer();
+
+      const sizeKb = Math.max(1, Math.round(webpBuffer.byteLength / 1024));
+      totalSizeKb += sizeKb;
+      const publicUrl = saveWebpPageToStorage(safeJobId, outWebpName, webpBuffer);
+
+      slices.push({
+        pageNumber: outIdx,
+        name: numSlices > 1 ? `${baseLabel} (Part ${s + 1}/${numSlices})` : baseLabel,
+        url: publicUrl,
+        sizeKb,
+      });
+    }
+
+    return { slices, totalSizeKb };
+  }
+
+  // Fallback for ultra-tall (>35MP) single strips: extract from source before resizing width
+  const origSliceHeight = Math.ceil(origHeight / numSlices);
   for (let s = 0; s < numSlices; s++) {
-    const top = s * sliceHeight;
-    if (top >= actualH) break;
-    const height = Math.min(sliceHeight, actualH - top);
+    const top = s * origSliceHeight;
+    if (top >= origHeight) break;
+    const height = Math.min(origSliceHeight, origHeight - top);
     if (height <= 0) break;
 
     const outIdx = startPageCounter + slices.length;
     const padded = String(outIdx).padStart(3, '0');
     const outWebpName = `page-${padded}.webp`;
 
-    const webpBuffer = await sharp(resizedPngBuffer, { limitInputPixels: false })
+    const webpBuffer = await sharp(source, { limitInputPixels: false })
       .extract({
         left: 0,
         top,
-        width: actualW,
+        width: origWidth,
         height,
       })
+      .resize({
+        width: targetWidth,
+        withoutEnlargement: true,
+      })
       .webp({
-        quality: 92,
+        quality: 90,
         smartSubsample: true,
-        effort: 4,
+        effort: 2,
       })
       .toBuffer();
 
@@ -208,7 +296,6 @@ async function convertPageToHdWebpSlices(params: {
 function normalizePdfDownloadUrl(rawUrl: string): { url: string; driveFileId?: string } {
   const trimmed = rawUrl.trim();
 
-  // Pattern 1: https://drive.google.com/file/d/FILE_ID/view...
   const fileDMatch = trimmed.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/i);
   if (fileDMatch?.[1]) {
     const fileId = fileDMatch[1];
@@ -218,7 +305,6 @@ function normalizePdfDownloadUrl(rawUrl: string): { url: string; driveFileId?: s
     };
   }
 
-  // Pattern 2: https://drive.google.com/open?id=FILE_ID or uc?id=FILE_ID
   const idParamMatch = trimmed.match(
     /drive\.google\.com\/(?:open|uc)\?[^#]*[?&]id=([a-zA-Z0-9_-]+)/i
   );
@@ -255,7 +341,6 @@ async function downloadPdfFromUrl(rawUrl: string, destPdfPath: string): Promise<
   const contentType = (response.headers.get('content-type') || '').toLowerCase();
   let buffer = Buffer.from(await response.arrayBuffer());
 
-  // Handle Google Drive large-file confirmation HTML page if needed
   if (
     driveFileId &&
     (contentType.includes('text/html') || buffer.subarray(0, 5).toString('utf8') !== '%PDF-')
@@ -279,7 +364,6 @@ async function downloadPdfFromUrl(rawUrl: string, destPdfPath: string): Promise<
     }
   }
 
-  // Find %PDF- header within the first 1024 bytes (some servers prepend whitespace/headers)
   const headerSlice = buffer.subarray(0, 1024).toString('latin1');
   const pdfHeaderIndex = headerSlice.indexOf('%PDF-');
   if (pdfHeaderIndex === -1) {
@@ -304,115 +388,192 @@ async function downloadPdfFromUrl(rawUrl: string, destPdfPath: string): Promise<
 }
 
 /**
- * Renders a PDF file on disk into HD WebP pages using Ghostscript (/usr/bin/gs)
- * with lossless 24-bit PNG + 4x antialiasing at 180 DPI, followed by full-width
- * sharp WebP conversion (preserving 100% of horizontal resolution on tall Webtoon strips).
+ * Counts pages in a PDF using Ghostscript fast nodisplay query.
+ */
+async function getPdfPageCount(pdfPath: string, maxPages: number): Promise<number> {
+  try {
+    const { stdout } = await execFileAsync(
+      '/usr/bin/gs',
+      [
+        '-q',
+        '-dNOSAFER',
+        '-dNODISPLAY',
+        '-c',
+        `(${pdfPath.replace(/\\/g, '/')}) (r) file runpdfbegin pdfpagecount = quit`,
+      ],
+      { timeout: 15000 }
+    );
+    const parsed = parseInt(stdout.trim(), 10);
+    if (!Number.isNaN(parsed) && parsed > 0) {
+      return Math.min(maxPages, parsed);
+    }
+  } catch {
+    // Fallback if fast page count query fails
+  }
+  return maxPages;
+}
+
+/**
+ * Renders a PDF file on disk into HD WebP pages in incremental batches,
+ * updating PdfJobStatus after every single page so large PDFs never hit HTTP proxy timeouts.
  */
 async function processPdfFileOnServer(params: {
   jobId: string;
   pdfPath: string;
   fileName: string;
   maxPages?: number;
-}): Promise<{
-  jobId: string;
-  fileName: string;
-  pageCount: number;
-  totalSizeKb: number;
-  pages: ServerProcessedPage[];
-}> {
-  const { jobId, pdfPath, fileName } = params;
+  pdfUrl?: string;
+}): Promise<PdfJobStatus> {
+  const { jobId, pdfPath, fileName, pdfUrl } = params;
   const maxTotalOutputPages = Math.min(60, Math.max(1, Number(params.maxPages) || 60));
   const safeJobId = sanitizeId(jobId);
   const workDir = path.dirname(pdfPath);
-  const rawPattern = path.join(workDir, 'raw-page-%03d.png');
 
-  // Render pages with Ghostscript in lossless 24-bit PNG with 4x subpixel antialiasing at 180 DPI
-  await execFileAsync(
-    '/usr/bin/gs',
-    [
-      '-dSAFER',
-      '-dBATCH',
-      '-dNOPAUSE',
-      '-dQUIET',
-      '-sDEVICE=png16m',
-      '-dTextAlphaBits=4',
-      '-dGraphicsAlphaBits=4',
-      '-r180',
-      '-dFirstPage=1',
-      `-dLastPage=${maxTotalOutputPages}`,
-      `-sOutputFile=${rawPattern}`,
-      pdfPath,
-    ],
-    { timeout: 180000, maxBuffer: 15 * 1024 * 1024 }
-  );
+  const jobState: PdfJobStatus = {
+    jobId: safeJobId,
+    status: 'processing',
+    phase: pdfUrl
+      ? 'Downloading PDF from remote link...'
+      : `Inspecting "${fileName}" on server...`,
+    fileName,
+    completedPages: 0,
+    totalPages: maxTotalOutputPages,
+    totalSizeKb: 0,
+    pages: [],
+    updatedAt: Date.now(),
+  };
+  saveJobStatus(jobState);
 
-  // Collect rendered raw PNG files
-  const filesInWorkDir = fs
-    .readdirSync(workDir)
-    .filter((f) => f.startsWith('raw-page-') && f.endsWith('.png'))
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  try {
+    if (pdfUrl) {
+      const downloadedName = await downloadPdfFromUrl(pdfUrl, pdfPath);
+      jobState.fileName = downloadedName;
+      jobState.phase = `Inspecting "${downloadedName}"...`;
+      saveJobStatus(jobState);
+    }
 
-  if (filesInWorkDir.length === 0) {
-    throw new Error('No pages could be extracted from the PDF file.');
-  }
+    const totalPdfPages = await getPdfPageCount(pdfPath, maxTotalOutputPages);
+    jobState.totalPages = totalPdfPages;
+    jobState.phase = `Rendering HD pages from "${jobState.fileName}" (0/${totalPdfPages})...`;
+    saveJobStatus(jobState);
 
-  const numPdfPages = filesInWorkDir.length;
-  // Budget vertical slices per PDF page so total output stays within Firestore's 60-page array limit
-  const maxSlicesPerPdfPage = Math.max(1, Math.floor(maxTotalOutputPages / numPdfPages));
+    const maxSlicesPerPdfPage = Math.max(1, Math.floor(maxTotalOutputPages / Math.max(1, totalPdfPages)));
+    const cleanBaseName = jobState.fileName.replace(/\.pdf$/i, '').trim() || 'Chapter';
+    const BATCH_SIZE = 8;
 
-  const cleanBaseName = fileName.replace(/\.pdf$/i, '').trim() || 'Chapter';
-  const processedPages: ServerProcessedPage[] = [];
-  let totalSizeKb = 0;
+    for (let batchStart = 1; batchStart <= totalPdfPages; batchStart += BATCH_SIZE) {
+      if (jobState.pages.length >= maxTotalOutputPages) break;
+      const batchEnd = Math.min(totalPdfPages, batchStart + BATCH_SIZE - 1);
 
-  for (let i = 0; i < filesInWorkDir.length; i++) {
-    if (processedPages.length >= maxTotalOutputPages) break;
-    const rawFile = filesInWorkDir[i];
-    const rawFullPath = path.join(workDir, rawFile);
-    const pdfPageNum = i + 1;
-    const remainingBudget = maxTotalOutputPages - processedPages.length;
-    const allowedSlices = Math.min(maxSlicesPerPdfPage, remainingBudget);
+      jobState.phase = `Rendering PDF pages ${batchStart}–${batchEnd} of ${totalPdfPages}...`;
+      saveJobStatus(jobState);
 
-    try {
-      const { slices, totalSizeKb: pageKb } = await convertPageToHdWebpSlices({
-        source: rawFullPath,
-        safeJobId,
-        baseLabel: `${cleanBaseName} - Page ${String(pdfPageNum).padStart(2, '0')}`,
-        maxSlicesForThisPage: allowedSlices,
-        startPageCounter: processedPages.length + 1,
-      });
+      const batchPrefix = `raw-${batchStart}-`;
+      const rawPattern = path.join(workDir, `${batchPrefix}%03d.png`);
 
-      totalSizeKb += pageKb;
-      processedPages.push(...slices);
-    } finally {
-      try {
-        fs.unlinkSync(rawFullPath);
-      } catch {
-        // ignore cleanup error
+      await execFileAsync(
+        '/usr/bin/gs',
+        [
+          '-dSAFER',
+          '-dBATCH',
+          '-dNOPAUSE',
+          '-dQUIET',
+          '-sDEVICE=png16m',
+          '-dNumRenderingThreads=2',
+          '-dTextAlphaBits=4',
+          '-dGraphicsAlphaBits=4',
+          '-r150',
+          `-dFirstPage=${batchStart}`,
+          `-dLastPage=${batchEnd}`,
+          `-sOutputFile=${rawPattern}`,
+          pdfPath,
+        ],
+        { timeout: 120000, maxBuffer: 15 * 1024 * 1024 }
+      );
+
+      const batchFiles = fs
+        .readdirSync(workDir)
+        .filter((f) => f.startsWith(batchPrefix) && f.endsWith('.png'))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+      if (batchFiles.length === 0 && batchStart === 1) {
+        throw new Error('No pages could be extracted from the PDF file.');
+      }
+
+      for (let i = 0; i < batchFiles.length; i++) {
+        if (jobState.pages.length >= maxTotalOutputPages) break;
+        const rawFile = batchFiles[i];
+        const rawFullPath = path.join(workDir, rawFile);
+        const pdfPageNum = batchStart + i;
+        const remainingBudget = maxTotalOutputPages - jobState.pages.length;
+        const allowedSlices = Math.min(maxSlicesPerPdfPage, remainingBudget);
+
+        try {
+          const { slices, totalSizeKb: pageKb } = await convertPageToHdWebpSlices({
+            source: rawFullPath,
+            safeJobId,
+            baseLabel: `${cleanBaseName} - Page ${String(pdfPageNum).padStart(2, '0')}`,
+            maxSlicesForThisPage: allowedSlices,
+            startPageCounter: jobState.pages.length + 1,
+          });
+
+          jobState.totalSizeKb += pageKb;
+          jobState.pages.push(...slices);
+          jobState.completedPages = Math.min(totalPdfPages, pdfPageNum);
+          jobState.phase = `Converted HD WebP page ${jobState.completedPages}/${totalPdfPages} (${jobState.pages.length} panel${jobState.pages.length === 1 ? '' : 's'})...`;
+          saveJobStatus(jobState);
+        } finally {
+          try {
+            fs.unlinkSync(rawFullPath);
+          } catch {
+            // ignore cleanup error
+          }
+        }
+      }
+
+      if (batchFiles.length < batchEnd - batchStart + 1) {
+        // Reached actual end of PDF pages
+        break;
       }
     }
-  }
 
-  // Remove the source input.pdf after conversion
-  try {
-    fs.unlinkSync(pdfPath);
-  } catch {
-    // ignore cleanup error
-  }
+    try {
+      if (fs.existsSync(pdfPath)) {
+        fs.unlinkSync(pdfPath);
+      }
+    } catch {
+      // ignore cleanup error
+    }
 
-  return {
-    jobId: safeJobId,
-    fileName,
-    pageCount: processedPages.length,
-    totalSizeKb,
-    pages: processedPages,
-  };
+    if (jobState.pages.length === 0) {
+      throw new Error('No pages could be extracted from the PDF file.');
+    }
+
+    jobState.status = 'completed';
+    jobState.completedPages = jobState.pages.length;
+    jobState.totalPages = jobState.pages.length;
+    jobState.phase = `Completed ${jobState.pages.length} HD WebP pages`;
+    saveJobStatus(jobState);
+    return jobState;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Server failed to extract PDF pages.';
+    jobState.status = 'failed';
+    jobState.error = msg;
+    jobState.phase = msg;
+    saveJobStatus(jobState);
+    throw err;
+  }
+}
+
+function waitMs(ms: number): Promise<'timeout'> {
+  return new Promise((resolve) => setTimeout(() => resolve('timeout'), ms));
 }
 
 export async function POST(req: NextRequest) {
   try {
     const uploadAction = req.headers.get('x-upload-action') || '';
 
-    // 1. Chunked binary upload (1.5 MB slices from mobile file.slice() — zero phone RAM)
+    // 1. Chunked binary upload
     if (uploadAction === 'append-chunk') {
       const rawJobId = req.headers.get('x-job-id') || `pdf_${Date.now()}`;
       const chunkIndex = Number(req.headers.get('x-chunk-index') || '0');
@@ -438,7 +599,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 2. Single image file upload -> server-side HD sharp WebP conversion (full width preserved)
+    // 2. Single image file upload -> server-side HD sharp WebP conversion
     if (uploadAction === 'single-image') {
       const rawJobId = req.headers.get('x-job-id') || `img_${Date.now()}`;
       const pageIndex = Number(req.headers.get('x-page-index') || '1');
@@ -486,22 +647,80 @@ export async function POST(req: NextRequest) {
       const fileBuffer = Buffer.from(await file.arrayBuffer());
       fs.writeFileSync(targetPdfPath, fileBuffer);
 
-      const result = await processPdfFileOnServer({
+      const jobPromise = processPdfFileOnServer({
         jobId: safeJobId,
         pdfPath: targetPdfPath,
         fileName: file.name || 'chapter.pdf',
         maxPages,
       });
+      jobPromise.catch(() => {});
+
+      const raceResult = await Promise.race([jobPromise, waitMs(4000)]);
+      if (raceResult === 'timeout') {
+        const currentStatus = loadJobStatus(safeJobId);
+        return NextResponse.json({
+          success: true,
+          status: 'processing',
+          jobId: safeJobId,
+          phase: currentStatus?.phase || 'Rendering HD WebP pages...',
+          completedPages: currentStatus?.completedPages || 0,
+          totalPages: currentStatus?.totalPages || maxPages,
+        });
+      }
 
       return NextResponse.json({
         success: true,
-        ...result,
+        status: 'completed',
+        jobId: safeJobId,
+        fileName: raceResult.fileName,
+        pageCount: raceResult.pages.length,
+        totalSizeKb: raceResult.totalSizeKb,
+        pages: raceResult.pages,
       });
     }
 
-    // 4. JSON actions: 'finalize_pdf', 'process_url', or 'upload_single_page' (Vercel Serverless fallback)
+    // 4. JSON actions: 'finalize_pdf', 'check_job_status', 'process_url', or 'upload_single_page'
     const body = await req.json();
     const { action, jobId, fileName, pdfUrl, maxPages, imageDataUrl, pageNumber } = body;
+
+    if (action === 'check_job_status') {
+      if (!jobId) {
+        return NextResponse.json({ error: 'jobId is required' }, { status: 400 });
+      }
+      const safeJobId = sanitizeId(jobId);
+      const status = loadJobStatus(safeJobId);
+      if (!status) {
+        return NextResponse.json(
+          { error: 'PDF job not found on server.', status: 'failed' },
+          { status: 404 }
+        );
+      }
+
+      if (status.status === 'failed') {
+        return NextResponse.json(
+          {
+            success: false,
+            status: 'failed',
+            jobId: safeJobId,
+            error: status.error || 'Server failed to extract PDF pages.',
+          },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        status: status.status,
+        jobId: safeJobId,
+        phase: status.phase,
+        fileName: status.fileName,
+        completedPages: status.completedPages,
+        totalPages: status.totalPages,
+        totalSizeKb: status.totalSizeKb,
+        pageCount: status.pages.length,
+        pages: status.status === 'completed' ? status.pages : [],
+      });
+    }
 
     if (action === 'upload_single_page') {
       if (!imageDataUrl || typeof imageDataUrl !== 'string') {
@@ -519,30 +738,16 @@ export async function POST(req: NextRequest) {
         .resize({
           width: 1280,
           withoutEnlargement: true,
-          fit: 'inside',
         })
         .webp({
-          quality: 92,
+          quality: 90,
           smartSubsample: true,
-          effort: 4,
+          effort: 2,
         })
         .toBuffer();
 
       const sizeKb = Math.max(1, Math.round(webpBuffer.length / 1024));
-      const supabasePublicUrl = await uploadPageToSupabaseStorage(
-        safeJobId,
-        outFileName,
-        webpBuffer
-      );
-
-      // Also save locally as fallback
-      const outJobDir = path.join(PUBLIC_PAGES_ROOT, safeJobId);
-      ensureDir(outJobDir);
-      fs.writeFileSync(path.join(outJobDir, outFileName), webpBuffer);
-
-      const finalUrl =
-        supabasePublicUrl ||
-        `/api/pdf-pages/${encodeURIComponent(safeJobId)}/${encodeURIComponent(outFileName)}`;
+      const finalUrl = saveWebpPageToStorage(safeJobId, outFileName, webpBuffer);
 
       return NextResponse.json({
         success: true,
@@ -560,8 +765,32 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'jobId is required to finalize PDF' }, { status: 400 });
       }
       const safeJobId = sanitizeId(jobId);
-      const targetPdfPath = path.join(TMP_UPLOAD_ROOT, safeJobId, 'input.pdf');
+      const existingStatus = loadJobStatus(safeJobId);
+      if (existingStatus) {
+        if (existingStatus.status === 'completed') {
+          return NextResponse.json({
+            success: true,
+            status: 'completed',
+            jobId: safeJobId,
+            fileName: existingStatus.fileName,
+            pageCount: existingStatus.pages.length,
+            totalSizeKb: existingStatus.totalSizeKb,
+            pages: existingStatus.pages,
+          });
+        }
+        if (existingStatus.status === 'processing') {
+          return NextResponse.json({
+            success: true,
+            status: 'processing',
+            jobId: safeJobId,
+            phase: existingStatus.phase,
+            completedPages: existingStatus.completedPages,
+            totalPages: existingStatus.totalPages,
+          });
+        }
+      }
 
+      const targetPdfPath = path.join(TMP_UPLOAD_ROOT, safeJobId, 'input.pdf');
       if (!fs.existsSync(targetPdfPath)) {
         return NextResponse.json(
           { error: 'Uploaded PDF chunks not found on server. Please try uploading again.' },
@@ -569,16 +798,35 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const result = await processPdfFileOnServer({
+      const jobPromise = processPdfFileOnServer({
         jobId: safeJobId,
         pdfPath: targetPdfPath,
         fileName: fileName || 'chapter.pdf',
         maxPages: Number(maxPages) || 60,
       });
+      jobPromise.catch(() => {});
+
+      const raceResult = await Promise.race([jobPromise, waitMs(4000)]);
+      if (raceResult === 'timeout') {
+        const currentStatus = loadJobStatus(safeJobId);
+        return NextResponse.json({
+          success: true,
+          status: 'processing',
+          jobId: safeJobId,
+          phase: currentStatus?.phase || 'Rendering HD WebP panels...',
+          completedPages: currentStatus?.completedPages || 0,
+          totalPages: currentStatus?.totalPages || Number(maxPages) || 60,
+        });
+      }
 
       return NextResponse.json({
         success: true,
-        ...result,
+        status: 'completed',
+        jobId: safeJobId,
+        fileName: raceResult.fileName,
+        pageCount: raceResult.pages.length,
+        totalSizeKb: raceResult.totalSizeKb,
+        pages: raceResult.pages,
       });
     }
 
@@ -595,17 +843,36 @@ export async function POST(req: NextRequest) {
       ensureDir(jobUploadDir);
       const targetPdfPath = path.join(jobUploadDir, 'input.pdf');
 
-      const downloadedName = await downloadPdfFromUrl(pdfUrl.trim(), targetPdfPath);
-      const result = await processPdfFileOnServer({
+      const jobPromise = processPdfFileOnServer({
         jobId: safeJobId,
         pdfPath: targetPdfPath,
-        fileName: downloadedName,
+        fileName: 'remote-chapter.pdf',
         maxPages: Number(maxPages) || 60,
+        pdfUrl: pdfUrl.trim(),
       });
+      jobPromise.catch(() => {});
+
+      const raceResult = await Promise.race([jobPromise, waitMs(4000)]);
+      if (raceResult === 'timeout') {
+        const currentStatus = loadJobStatus(safeJobId);
+        return NextResponse.json({
+          success: true,
+          status: 'processing',
+          jobId: safeJobId,
+          phase: currentStatus?.phase || 'Downloading & rendering PDF from link...',
+          completedPages: currentStatus?.completedPages || 0,
+          totalPages: currentStatus?.totalPages || Number(maxPages) || 60,
+        });
+      }
 
       return NextResponse.json({
         success: true,
-        ...result,
+        status: 'completed',
+        jobId: safeJobId,
+        fileName: raceResult.fileName,
+        pageCount: raceResult.pages.length,
+        totalSizeKb: raceResult.totalSizeKb,
+        pages: raceResult.pages,
       });
     }
 

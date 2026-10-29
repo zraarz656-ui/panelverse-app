@@ -14,7 +14,6 @@ import {
 import { Chapter, Series } from '@/lib/types';
 import { CommentsSheet } from './CommentsSheet';
 import { useLanguage } from '@/context/LanguageContext';
-import { createReaderPanelSvg } from '@/lib/svg-covers';
 import { syncReadingProgressToFirestore } from '@/lib/supabase-sync';
 
 interface WebtoonReaderProps {
@@ -107,6 +106,10 @@ export function WebtoonReader({ chapter, userId, username }: WebtoonReaderProps)
   }, [recordProgress, isCompleted]);
 
   const [proxyRetries, setProxyRetries] = useState<Record<number, boolean>>({});
+
+  const toggleControls = () => {
+    setShowControls((prev) => !prev);
+  };
 
   const handlePageError = (pageNum: number, originalUrl: string) => {
     // Tier 1 fallback: Try proxying via /api/image-proxy

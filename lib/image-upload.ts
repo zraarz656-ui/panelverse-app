@@ -21,11 +21,116 @@ function yieldToMainThread(ms = 15): Promise<void> {
 }
 
 /**
- * Streams a local PDF file in lightweight 1.5 MB slices (Blob.slice) to the
- * Server-Side PDF Processor (/api/admin/pdf-processor).
- *
- * This completely eliminates client-side PDF.js Web Workers, HTML5 <canvas> allocations,
- * and multi-megabyte Base64 arrays in mobile browser memory while preserving full HD width.
+ * Resilient fetch wrapper that automatically retries transient network/proxy drops
+ * ("TypeError: Failed to fetch" or 502/503/504 gateway resets).
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  maxRetries = 4
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxRetries) {
+        await yieldToMainThread(600 * (attempt + 1));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        await yieldToMainThread(600 * (attempt + 1));
+      }
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Network connection interrupted while communicating with server processor.');
+}
+
+interface RawServerPage {
+  pageNumber: number;
+  name: string;
+  url: string;
+  sizeKb: number;
+}
+
+interface ServerJobResponse {
+  success?: boolean;
+  status?: 'processing' | 'completed' | 'failed';
+  jobId?: string;
+  phase?: string;
+  fileName?: string;
+  completedPages?: number;
+  totalPages?: number;
+  totalSizeKb?: number;
+  pages?: RawServerPage[];
+  error?: string;
+}
+
+/**
+ * Polls the non-blocking server PDF job until all HD WebP pages are ready.
+ * Each poll takes <10ms so large 50+ page Webtoon PDFs never trigger HTTP proxy timeouts.
+ */
+async function pollPdfJobUntilComplete(
+  jobId: string,
+  onProgress?: (status: string) => void
+): Promise<{
+  fileName: string;
+  totalSizeKb: number;
+  pages: RawServerPage[];
+}> {
+  const maxPolls = 180; // Up to ~4.5 minutes for massive multi-hundred-MB Webtoon PDFs
+  for (let poll = 0; poll < maxPolls; poll++) {
+    await yieldToMainThread(1400);
+
+    let data: ServerJobResponse;
+    let resOk = false;
+    try {
+      const pollRes = await fetchWithRetry(
+        '/api/admin/pdf-processor',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'check_job_status',
+            jobId,
+          }),
+        },
+        3
+      );
+      resOk = pollRes.ok;
+      data = await pollRes.json();
+    } catch {
+      // Transient poll hiccup — continue polling
+      continue;
+    }
+
+    if (data?.phase) {
+      onProgress?.(data.phase);
+    }
+
+    if (data?.status === 'completed' && Array.isArray(data.pages)) {
+      return {
+        fileName: data.fileName || 'chapter.pdf',
+        totalSizeKb: Number(data.totalSizeKb || 0),
+        pages: data.pages,
+      };
+    }
+
+    if (data?.status === 'failed' || (!resOk && data?.error)) {
+      throw new Error(data?.error || 'Server failed to extract PDF pages.');
+    }
+  }
+
+  throw new Error('PDF processing timed out on server. Please try a smaller PDF or fewer pages.');
+}
+
+/**
+ * Streams a local PDF file in lightweight 768 KB slices (Blob.slice) to the
+ * Server-Side PDF Processor (/api/admin/pdf-processor) and polls non-blocking job status.
  */
 export async function uploadPdfToServerProcessor(
   file: File,
@@ -35,7 +140,7 @@ export async function uploadPdfToServerProcessor(
   }
 ): Promise<ProcessedPanelPage[]> {
   const maxPages = options?.maxPages ?? 60;
-  const CHUNK_SIZE = 1.5 * 1024 * 1024; // 1.5 MB per chunk — zero mobile RAM spike
+  const CHUNK_SIZE = 768 * 1024; // 768 KB per chunk — fast & proxy-safe
   const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
   const jobId = `pdf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -43,6 +148,7 @@ export async function uploadPdfToServerProcessor(
     const start = chunkIndex * CHUNK_SIZE;
     const end = Math.min(file.size, start + CHUNK_SIZE);
     const chunkBlob = file.slice(start, end);
+    const chunkBuffer = await chunkBlob.arrayBuffer();
     const pct = Math.round(((chunkIndex + 1) / totalChunks) * 100);
 
     options?.onProgress?.(
@@ -51,17 +157,21 @@ export async function uploadPdfToServerProcessor(
         : `Sending "${file.name}" to Server HD PDF Processor...`
     );
 
-    const chunkRes = await fetch('/api/admin/pdf-processor', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'x-upload-action': 'append-chunk',
-        'x-job-id': jobId,
-        'x-chunk-index': String(chunkIndex),
-        'x-total-chunks': String(totalChunks),
+    const chunkRes = await fetchWithRetry(
+      '/api/admin/pdf-processor',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'x-upload-action': 'append-chunk',
+          'x-job-id': jobId,
+          'x-chunk-index': String(chunkIndex),
+          'x-total-chunks': String(totalChunks),
+        },
+        body: chunkBuffer,
       },
-      body: chunkBlob,
-    });
+      4
+    );
 
     if (!chunkRes.ok) {
       let errMsg = `Failed to upload PDF chunk ${chunkIndex + 1}/${totalChunks}`;
@@ -81,34 +191,61 @@ export async function uploadPdfToServerProcessor(
     `Server rendering HD full-width WebP panels from "${file.name}"...`
   );
 
-  const finalizeRes = await fetch('/api/admin/pdf-processor', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      action: 'finalize_pdf',
-      jobId,
-      fileName: file.name,
-      maxPages,
-    }),
-  });
+  let data: ServerJobResponse | null = null;
+  let finalizeOk = false;
 
-  const data = await finalizeRes.json();
-  if (!finalizeRes.ok || !data?.success) {
+  try {
+    const finalizeRes = await fetchWithRetry(
+      '/api/admin/pdf-processor',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'finalize_pdf',
+          jobId,
+          fileName: file.name,
+          maxPages,
+        }),
+      },
+      2
+    );
+    finalizeOk = finalizeRes.ok;
+    data = await finalizeRes.json();
+  } catch {
+    // If initial finalize request timed out at the proxy layer, recover via job status polling
+    const polled = await pollPdfJobUntilComplete(jobId, options?.onProgress);
+    return polled.pages.map((p) => ({
+      name: p.name,
+      dataUrl: p.url,
+      sizeKb: p.sizeKb,
+    }));
+  }
+
+  if (data?.status === 'processing') {
+    if (data.phase) {
+      options?.onProgress?.(data.phase);
+    }
+    const polled = await pollPdfJobUntilComplete(data.jobId || jobId, options?.onProgress);
+    return polled.pages.map((p) => ({
+      name: p.name,
+      dataUrl: p.url,
+      sizeKb: p.sizeKb,
+    }));
+  }
+
+  if (!finalizeOk || !data?.success) {
     const errText = String(data?.error || '');
-    // Automatic fallback on Vercel Free Tier Serverless where native /usr/bin/gs is absent:
-    // Renders 1 page at a time, sends to server Sharp + Supabase Storage, and frees phone RAM immediately.
     if (errText.includes('/usr/bin/gs') || errText.includes('ENOENT')) {
       return streamPdfPagesToSupabaseViaSharp(file, jobId, maxPages, options?.onProgress);
     }
     throw new Error(errText || 'Server failed to extract PDF pages.');
   }
 
-  const pages: Array<{ pageNumber: number; name: string; url: string; sizeKb: number }> =
-    Array.isArray(data.pages) ? data.pages : [];
+  const pages: RawServerPage[] = Array.isArray(data.pages) ? data.pages : [];
 
   return pages.map((p) => ({
     name: p.name,
-    dataUrl: p.url, // Lightweight server/Supabase URL — keeps phone RAM near zero
+    dataUrl: p.url,
     sizeKb: p.sizeKb,
   }));
 }
@@ -140,7 +277,7 @@ async function streamPdfPagesToSupabaseViaSharp(
 
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
     onProgress?.(
-      `Streaming HD Page ${pageNum}/${totalPages} of "${file.name}" to Supabase Storage...`
+      `Streaming HD Page ${pageNum}/${totalPages} of "${file.name}" to Server Storage...`
     );
     const page = await pdfDoc.getPage(pageNum);
     const baseViewport = page.getViewport({ scale: 1 });
@@ -156,23 +293,26 @@ async function streamPdfPagesToSupabaseViaSharp(
       await page.render({ canvasContext: ctx, viewport, canvas }).promise;
     }
 
-    const pageDataUrl = canvas.toDataURL('image/webp', 0.92);
-    // Immediately release mobile canvas & page memory before network upload
+    const pageDataUrl = canvas.toDataURL('image/webp', 0.9);
     canvas.width = 0;
     canvas.height = 0;
     page.cleanup();
 
-    const uploadRes = await fetch('/api/admin/pdf-processor', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'upload_single_page',
-        jobId,
-        fileName: file.name,
-        pageNumber: pageNum,
-        imageDataUrl: pageDataUrl,
-      }),
-    });
+    const uploadRes = await fetchWithRetry(
+      '/api/admin/pdf-processor',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'upload_single_page',
+          jobId,
+          fileName: file.name,
+          pageNumber: pageNum,
+          imageDataUrl: pageDataUrl,
+        }),
+      },
+      3
+    );
 
     const uploadJson = await uploadRes.json();
     if (uploadRes.ok && uploadJson?.page?.url) {
@@ -192,7 +332,7 @@ async function streamPdfPagesToSupabaseViaSharp(
 
 /**
  * Sends a remote PDF URL or Google Drive PDF share link to the Server-Side PDF Processor
- * so the server downloads, extracts, and optimizes all pages into HD WebP without using phone memory.
+ * and polls non-blocking job status until all HD WebP pages are ready.
  */
 export async function processPdfUrlViaServer(
   pdfUrl: string,
@@ -208,25 +348,45 @@ export async function processPdfUrlViaServer(
   const maxPages = options?.maxPages ?? 60;
   options?.onProgress?.('Server is downloading & rendering HD WebP pages from link...');
 
-  const res = await fetch('/api/admin/pdf-processor', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      action: 'process_url',
-      pdfUrl: pdfUrl.trim(),
-      maxPages,
-    }),
-  });
+  const res = await fetchWithRetry(
+    '/api/admin/pdf-processor',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'process_url',
+        pdfUrl: pdfUrl.trim(),
+        maxPages,
+      }),
+    },
+    3
+  );
 
-  const data = await res.json();
+  const data: ServerJobResponse = await res.json();
+
+  if (data?.status === 'processing' && data.jobId) {
+    if (data.phase) {
+      options?.onProgress?.(data.phase);
+    }
+    const polled = await pollPdfJobUntilComplete(data.jobId, options?.onProgress);
+    return {
+      fileName: polled.fileName,
+      totalSizeKb: polled.totalSizeKb,
+      pages: polled.pages.map((p) => ({
+        name: p.name,
+        dataUrl: p.url,
+        sizeKb: p.sizeKb,
+      })),
+    };
+  }
+
   if (!res.ok || !data?.success) {
     throw new Error(
       data?.error || 'Could not download or extract PDF from the provided link.'
     );
   }
 
-  const pages: Array<{ pageNumber: number; name: string; url: string; sizeKb: number }> =
-    Array.isArray(data.pages) ? data.pages : [];
+  const pages: RawServerPage[] = Array.isArray(data.pages) ? data.pages : [];
 
   return {
     fileName: data.fileName || 'remote-chapter.pdf',
@@ -247,17 +407,22 @@ export async function uploadImageFileToServerWebp(
   jobId: string,
   pageIndex: number
 ): Promise<ProcessedPanelPage[]> {
-  const res = await fetch('/api/admin/pdf-processor', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/octet-stream',
-      'x-upload-action': 'single-image',
-      'x-job-id': jobId,
-      'x-page-index': String(pageIndex),
-      'x-file-name': encodeURIComponent(file.name),
+  const fileBuffer = await file.arrayBuffer();
+  const res = await fetchWithRetry(
+    '/api/admin/pdf-processor',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'x-upload-action': 'single-image',
+        'x-job-id': jobId,
+        'x-page-index': String(pageIndex),
+        'x-file-name': encodeURIComponent(file.name),
+      },
+      body: fileBuffer,
     },
-    body: file,
-  });
+    3
+  );
 
   const data = await res.json();
   if (!res.ok || !data?.success) {

@@ -16,7 +16,6 @@ import {
 import { Chapter, Series } from '@/lib/types';
 import { CommentsSheet } from './CommentsSheet';
 import { useLanguage } from '@/context/LanguageContext';
-import { createReaderPanelSvg } from '@/lib/svg-covers';
 import { syncReadingProgressToFirestore } from '@/lib/supabase-sync';
 
 interface MangaReaderProps {
