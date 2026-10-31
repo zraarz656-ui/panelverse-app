@@ -1,367 +1,323 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
+  MessageSquare,
   ChevronLeft,
   ChevronRight,
-  MessageSquare,
-  Sliders,
-  CheckCircle,
+  Eye,
+  EyeOff,
+  ArrowUp,
 } from 'lucide-react';
-import { Chapter, Series } from '@/lib/types';
 import { CommentsSheet } from './CommentsSheet';
-import { useLanguage } from '@/context/LanguageContext';
-import { syncReadingProgressToFirestore } from '@/lib/supabase-sync';
+import { ResilientImage } from './ResilientImage';
+import { Chapter, Series, PageImage } from '@/lib/types';
 
 interface WebtoonReaderProps {
   chapter: Chapter & {
+    number?: number;
     series?: Series;
-    prevChapterId?: string;
-    nextChapterId?: string;
+    prevChapterId?: string | null;
+    nextChapterId?: string | null;
   };
-  userId: string;
-  username: string;
+  series?: Series;
+  prevChapterId?: string | null;
+  nextChapterId?: string | null;
+  userId?: string;
+  username?: string;
 }
 
-export function WebtoonReader({ chapter, userId, username }: WebtoonReaderProps) {
-  const router = useRouter();
-  const { language, t } = useLanguage();
-  const [showControls, setShowControls] = useState(true);
-  const [widthMode, setWidthMode] = useState<'standard' | 'wide' | 'fill'>('standard');
+export function WebtoonReader({
+  chapter,
+  series: seriesProp,
+  prevChapterId: prevChapterIdProp,
+  nextChapterId: nextChapterIdProp,
+  userId = 'guest',
+  username = 'GuestReader',
+}: WebtoonReaderProps) {
+  const [hudVisible, setHudVisible] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
   const [commentsOpen, setCommentsOpen] = useState(false);
-  const [scrollPercent, setScrollPercent] = useState(0);
-  const [isCompleted, setIsCompleted] = useState(false);
-  const [failedPages, setFailedPages] = useState<Record<number, boolean>>({});
   const containerRef = useRef<HTMLDivElement>(null);
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastSavedPage = useRef<number>(1);
 
-  const maxWidthClass =
-    widthMode === 'fill' ? 'max-w-4xl' : widthMode === 'wide' ? 'max-w-2xl' : 'max-w-xl';
-
-  const recordProgress = useCallback(
-    (pct: number, completed: boolean) => {
-      if (!chapter.series) return;
-      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-
-      saveTimeoutRef.current = setTimeout(async () => {
-        const payload = {
-          seriesId: chapter.seriesId,
-          chapterId: chapter.id,
-          chapterNumber: chapter.chapterNumber,
-          seriesTitle: chapter.series?.title || 'Webtoon',
-          seriesSlug: chapter.series?.slug || chapter.seriesId,
-          seriesType: 'webtoon' as const,
-          coverImage: chapter.series?.coverImage || '/placeholder.jpg',
-          pageIndex: Math.floor((pct / 100) * chapter.pages.length),
-          totalPages: chapter.pages.length,
-          scrollPercentage: pct,
-          isCompleted: completed,
-        };
-
-        try {
-          await syncReadingProgressToFirestore(payload);
-        } catch (fsErr) {
-          console.error('Failed to sync webtoon progress to Firestore:', fsErr);
-        }
-
-        try {
-          await fetch('/api/progress', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId,
-              ...payload,
-            }),
-          });
-        } catch (err) {
-          console.error('Failed to update webtoon progress:', err);
-        }
-      }, 500);
-    },
-    [chapter, userId]
+  const series = seriesProp || chapter?.series;
+  const seriesId = series?.id || chapter?.seriesId || 'unknown-series';
+  const seriesSlug = series?.slug || seriesId;
+  const seriesTitle = series?.title || 'Webtoon Series';
+  const coverImage = series?.coverImage || '';
+  const chapterNumber = chapter?.chapterNumber ?? chapter?.number ?? 1;
+  const rawChapterTitle = chapter?.title || `Episode ${chapterNumber}`;
+  const cleanSubtitle = rawChapterTitle
+    .replace(/^(?:Episode|Chapter|Ep\.?|Ch\.?)\s*\d+\s*[:\-—]?\s*/i, '')
+    .trim();
+  const displayHeading = cleanSubtitle
+    ? `Ep. ${chapterNumber} — ${cleanSubtitle}`
+    : `Episode ${chapterNumber}`;
+  const pages: PageImage[] = useMemo(
+    () => (Array.isArray(chapter.pages) ? chapter.pages : []),
+    [chapter.pages]
   );
+  const prevChapterId = prevChapterIdProp ?? chapter?.prevChapterId ?? null;
+  const nextChapterId = nextChapterIdProp ?? chapter?.nextChapterId ?? null;
 
   useEffect(() => {
     const handleScroll = () => {
-      const el = document.documentElement;
-      const totalHeight = el.scrollHeight - el.clientHeight;
-      if (totalHeight <= 0) return;
-
-      const currentScroll = el.scrollTop;
-      const pct = Math.min(100, Math.round((currentScroll / totalHeight) * 100));
-      setScrollPercent(pct);
-
-      const completed = pct >= 95;
-      if (completed && !isCompleted) {
-        setIsCompleted(true);
-      }
-      recordProgress(pct, completed);
+      const panels = document.querySelectorAll('[data-page-number]');
+      let active = 1;
+      panels.forEach((panel) => {
+        const rect = panel.getBoundingClientRect();
+        if (rect.top <= window.innerHeight * 0.5) {
+          active = Number(panel.getAttribute('data-page-number') || 1);
+        }
+      });
+      setCurrentPage(active);
     };
 
     window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
-  }, [recordProgress, isCompleted]);
+  }, []);
 
-  const [proxyRetries, setProxyRetries] = useState<Record<number, boolean>>({});
+  const progressPercent = Math.round(
+    (currentPage / Math.max(1, pages.length)) * 100
+  );
 
-  const toggleControls = () => {
-    setShowControls((prev) => !prev);
-  };
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (lastSavedPage.current !== currentPage && pages.length > 0) {
+        lastSavedPage.current = currentPage;
+        fetch('/api/progress', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId,
+            seriesId,
+            chapterId: chapter.id,
+            chapterNumber,
+            seriesTitle,
+            seriesSlug,
+            seriesType: 'webtoon',
+            coverImage,
+            pageIndex: Math.max(0, currentPage - 1),
+            totalPages: pages.length,
+            scrollPercentage: progressPercent,
+            isCompleted: currentPage >= pages.length,
+          }),
+        }).catch(() => {});
+      }
+    }, 800);
 
-  const handlePageError = (pageNum: number, originalUrl: string) => {
-    // Tier 1 fallback: Try proxying via /api/image-proxy
-    if (!proxyRetries[pageNum] && originalUrl.startsWith('http')) {
-      setProxyRetries((prev) => ({ ...prev, [pageNum]: true }));
-    } else {
-      // Tier 2: Mark failed
-      setFailedPages((prev) => ({ ...prev, [pageNum]: true }));
-    }
-  };
-
-  const getPageUrl = (page: { pageNumber: number; imageUrl: string }) => {
-    const pageNum = page.pageNumber;
-    if (failedPages[pageNum]) {
-      return null;
-    }
-    if (proxyRetries[pageNum] && page.imageUrl.startsWith('http')) {
-      return `/api/image-proxy?url=${encodeURIComponent(page.imageUrl)}&title=${encodeURIComponent(
-        chapter.series?.title || 'Webtoon'
-      )}&type=webtoon&mode=page&chapter=${chapter.chapterNumber}&page=${pageNum}`;
-    }
-    return page.imageUrl;
-  };
+    return () => clearTimeout(timer);
+  }, [
+    currentPage,
+    chapter.id,
+    chapterNumber,
+    pages.length,
+    progressPercent,
+    seriesId,
+    seriesSlug,
+    seriesTitle,
+    coverImage,
+    userId,
+  ]);
 
   return (
-    <div className="min-h-screen bg-black text-slate-100 flex flex-col items-center">
-      {/* Top Floating Control Bar */}
+    <div ref={containerRef} className="min-h-screen bg-[#07070A] text-slate-100 select-none">
+      {/* Top Floating HUD */}
       <header
-        className={`fixed top-0 left-0 right-0 z-40 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md transition-all duration-200 ${
-          showControls
-            ? 'translate-y-0 opacity-100'
-            : '-translate-y-full opacity-0 pointer-events-none'
+        className={`fixed top-0 left-0 right-0 z-40 bg-zinc-950/95 backdrop-blur-md border-b border-zinc-800/80 transition-transform duration-300 ${
+          hudVisible ? 'translate-y-0' : '-translate-y-full'
         }`}
       >
-        <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
-          <div className="flex items-center gap-3">
+        <div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-4 gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <Link
-              href={chapter.series ? `/series/${chapter.series.slug}` : '/'}
-              className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
-              aria-label="Back to series"
+              href={`/series/${seriesSlug}`}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white transition-colors"
             >
               <ArrowLeft className="h-4 w-4" />
             </Link>
-            <div className="flex flex-col">
-              <span className="text-xs font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
-                {language === 'ml' && chapter.series?.malayalamTitle
-                  ? chapter.series.malayalamTitle
-                  : chapter.series?.title || 'Webtoon'}
-              </span>
-              <span className="text-[11px] text-slate-400 truncate max-w-[230px] sm:max-w-md">
-                {t.episode} {chapter.chapterNumber} · {chapter.title}
-                {chapter.language ? ` · ${chapter.language}` : ''}
-                {chapter.isLiveStreamed ? ' · Live Stream' : ''}
-              </span>
+            <div className="min-w-0">
+              <p className="truncate text-xs text-slate-400">{seriesTitle}</p>
+              <h1 className="truncate text-sm font-bold text-white">
+                {displayHeading}
+              </h1>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* Width Toggle */}
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="hidden sm:inline-block rounded-md bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-1 font-mono text-xs font-semibold text-emerald-400">
+              WEBTOON
+            </span>
             <button
-              type="button"
-              onClick={() =>
-                setWidthMode((prev) =>
-                  prev === 'standard' ? 'wide' : prev === 'wide' ? 'fill' : 'standard'
-                )
-              }
-              title={`Layout: ${widthMode}`}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
-            >
-              <Sliders className="h-4 w-4" />
-            </button>
-
-            {/* Comments Toggle */}
-            <button
-              type="button"
               onClick={() => setCommentsOpen(true)}
-              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 text-xs font-medium text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+              className="flex h-9 items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 text-xs font-medium text-slate-200 hover:border-zinc-700 cursor-pointer"
             >
-              <MessageSquare className="h-3.5 w-3.5 text-rose-400" />
-              <span className="hidden sm:inline leading-none">{t.comments}</span>
+              <MessageSquare className="h-3.5 w-3.5 text-rose-500" />
+              <span className="hidden md:inline">Comments</span>
             </button>
           </div>
-        </div>
-
-        {/* Scroll Progress Line */}
-        <div className="h-0.5 w-full bg-slate-800">
-          <div
-            className="h-full bg-rose-500 transition-all duration-150"
-            style={{ width: `${scrollPercent}%` }}
-          />
         </div>
       </header>
 
-      {/* Main Continuous Webtoon Strip */}
-      <main
-        ref={containerRef}
-        onClick={toggleControls}
-        className={`w-full ${maxWidthClass} transition-all duration-200 cursor-pointer pt-14 pb-24`}
+      {/* Seamless Vertical Webtoon Canvas */}
+      <div
+        onClick={() => setHudVisible((prev) => !prev)}
+        className="mx-auto max-w-[800px] pt-14 pb-20 cursor-pointer"
       >
-        <div className="flex flex-col gap-0 select-none bg-slate-950">
-          {chapter.pages.map((page, idx) => {
-            const pageNum = page.pageNumber || idx + 1;
-            const currentSrc = getPageUrl({ pageNumber: pageNum, imageUrl: page.imageUrl });
-
-            return (
-              <div key={pageNum} className="relative w-full min-h-[300px] bg-slate-950 flex items-center justify-center">
-                {currentSrc ? (
-                  /* eslint-disable-next-line @next/next/no-img-element */
-                  <img
-                    src={currentSrc}
-                    alt={`${chapter.title} - Panel ${pageNum}`}
-                    loading={idx < 4 ? 'eager' : 'lazy'}
-                    referrerPolicy="no-referrer"
-                    onError={() => handlePageError(pageNum, page.imageUrl)}
-                    className="block w-full h-auto object-contain"
-                  />
-                ) : (
-                  <div className="flex flex-col items-center justify-center p-8 my-4 rounded-xl border border-slate-800 bg-slate-900/60 text-center max-w-sm mx-auto">
-                    <p className="text-xs text-slate-400 font-mono">Panel {pageNum}</p>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setFailedPages((prev) => {
-                          const next = { ...prev };
-                          delete next[pageNum];
-                          return next;
-                        });
-                        setProxyRetries((prev) => {
-                          const next = { ...prev };
-                          delete next[pageNum];
-                          return next;
-                        });
-                      }}
-                      className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-rose-500"
-                    >
-                      Reload Panel
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+        <div className="flex flex-col leading-none">
+          {pages.map((page, idx) => (
+            <div
+              key={page.pageNumber || idx}
+              data-page-number={page.pageNumber}
+              className="relative w-full bg-zinc-950"
+            >
+              <ResilientImage
+                src={page.imageUrl}
+                alt={page.caption || `Page ${page.pageNumber}`}
+                className="w-full h-auto block"
+                fallbackTitle={seriesTitle}
+                fallbackType="webtoon"
+                fallbackMode="page"
+                chapterNumber={chapterNumber}
+                pageNumber={page.pageNumber}
+                priority={idx < 2}
+              />
+            </div>
+          ))}
         </div>
 
         {/* End of Episode Card */}
-        <div className="mt-8 mx-4 rounded-xl border border-slate-800 bg-slate-900/60 p-6 text-center">
-          <div className="flex items-center justify-center gap-2 text-rose-400 text-sm font-semibold">
-            <CheckCircle className="h-5 w-5" />
-            <span>Episode {chapter.chapterNumber} Finished!</span>
-          </div>
-          <p className="mt-1 text-xs text-slate-400">
-            You completed {chapter.title}. Reading progress saved.
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="mx-4 mt-12 rounded-2xl border border-zinc-800/80 bg-zinc-900/60 p-6 text-center cursor-default"
+        >
+          <p className="text-xs font-semibold uppercase tracking-widest text-rose-400">
+            End of Episode {chapterNumber}
           </p>
+          <h2 className="mt-1 text-xl font-bold text-white">
+            {cleanSubtitle || `Episode ${chapterNumber}`}
+          </h2>
 
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-            {chapter.prevChapterId && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  router.push(`/read/${chapter.prevChapterId}`);
-                }}
-                className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-700 transition-colors cursor-pointer"
+            {prevChapterId ? (
+              <Link
+                href={`/read/${prevChapterId}`}
+                className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800/80 px-5 py-3 text-sm font-medium text-white hover:bg-zinc-800 transition-colors"
               >
-                <ChevronLeft className="h-4 w-4" /> Prev Episode
-              </button>
+                <ChevronLeft className="h-4 w-4" /> Previous Episode
+              </Link>
+            ) : (
+              <span className="flex items-center gap-2 rounded-xl border border-zinc-800/60 bg-zinc-900/40 px-5 py-3 text-sm font-medium text-slate-600">
+                <ChevronLeft className="h-4 w-4" /> First Episode
+              </span>
             )}
 
             <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setCommentsOpen(true);
-              }}
-              className="flex items-center gap-1.5 rounded-lg border border-rose-900/80 bg-rose-950/40 px-4 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-900/60 transition-colors cursor-pointer"
+              onClick={() => setCommentsOpen(true)}
+              className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-medium text-slate-200 hover:bg-zinc-800 transition-colors cursor-pointer"
             >
-              <MessageSquare className="h-4 w-4" /> Discuss Episode
+              <MessageSquare className="h-4 w-4 text-rose-500" /> Episode Comments
             </button>
 
-            {chapter.nextChapterId ? (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  router.push(`/read/${chapter.nextChapterId}`);
-                }}
-                className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-500 transition-colors cursor-pointer"
+            {nextChapterId ? (
+              <Link
+                href={`/read/${nextChapterId}`}
+                className="flex items-center gap-2 rounded-xl bg-rose-600 px-6 py-3 text-sm font-semibold text-white hover:bg-rose-500 transition-colors shadow-lg shadow-rose-600/25"
               >
                 Next Episode <ChevronRight className="h-4 w-4" />
-              </button>
+              </Link>
             ) : (
               <Link
-                href={chapter.series ? `/series/${chapter.series.slug}` : '/'}
-                className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-700 transition-colors"
+                href={`/series/${seriesSlug}`}
+                className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800 px-5 py-3 text-sm font-medium text-white"
               >
-                Series Details
+                Back to Series
               </Link>
             )}
           </div>
         </div>
-      </main>
+      </div>
 
-      {/* Bottom Floating Bar */}
-      <footer
-        className={`fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800 bg-slate-950/90 backdrop-blur-md transition-all duration-200 ${
-          showControls
-            ? 'translate-y-0 opacity-100'
-            : 'translate-y-full opacity-0 pointer-events-none'
+      {/* Bottom Floating HUD — docked flush to bottom of viewport */}
+      <div
+        className={`fixed bottom-0 left-0 right-0 z-40 bg-zinc-950/95 backdrop-blur-md border-t border-zinc-800/80 pb-safe transition-transform duration-300 ${
+          hudVisible ? 'translate-y-0' : 'translate-y-full'
         }`}
       >
-        <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
-          <div className="flex items-center gap-2">
+        <div className="mx-auto flex h-12 max-w-4xl items-center justify-between px-4 gap-3">
+          <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
+            <span>
+              PANEL {currentPage} / {pages.length}
+            </span>
+            <span className="text-zinc-600">•</span>
+            <span className="text-rose-400 font-semibold">{progressPercent}%</span>
+          </div>
+
+          <div className="flex-1 max-w-xs hidden sm:block">
+            <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
+              <div
+                className="h-full bg-rose-500 transition-all duration-200"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {prevChapterId && (
+              <Link
+                href={`/read/${prevChapterId}`}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white transition-colors"
+                title="Previous Episode"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Link>
+            )}
+            {nextChapterId && (
+              <Link
+                href={`/read/${nextChapterId}`}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white transition-colors"
+                title="Next Episode"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Link>
+            )}
             <button
-              type="button"
-              disabled={!chapter.prevChapterId}
-              onClick={() => chapter.prevChapterId && router.push(`/read/${chapter.prevChapterId}`)}
-              className="flex items-center gap-1 rounded-md border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 disabled:opacity-30 hover:bg-slate-800 transition-colors cursor-pointer"
+              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-400 hover:text-white cursor-pointer"
+              title="Back to top"
             >
-              <ChevronLeft className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Prev</span>
+              <ArrowUp className="h-4 w-4" />
             </button>
-          </div>
-
-          <div className="flex items-center gap-3 text-xs text-slate-400">
-            <span className="font-mono tabular-nums text-slate-200">{scrollPercent}%</span>
-            <span>·</span>
-            <span className="font-mono tabular-nums">{chapter.pages.length} Panels</span>
-          </div>
-
-          <div className="flex items-center gap-2">
             <button
-              type="button"
-              disabled={!chapter.nextChapterId}
-              onClick={() => chapter.nextChapterId && router.push(`/read/${chapter.nextChapterId}`)}
-              className="flex items-center gap-1 rounded-md bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-30 hover:bg-rose-500 transition-colors cursor-pointer"
+              onClick={() => setHudVisible(false)}
+              className="flex h-8 items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 text-xs text-slate-400 hover:text-white cursor-pointer"
             >
-              <span className="hidden sm:inline">Next</span>
-              <ChevronRight className="h-3.5 w-3.5" />
+              <EyeOff className="h-3.5 w-3.5" /> Hide HUD
             </button>
           </div>
         </div>
-      </footer>
+      </div>
 
-      {/* Comments Drawer */}
+      {!hudVisible && (
+        <button
+          onClick={() => setHudVisible(true)}
+          className="fixed bottom-5 right-4 z-40 flex h-10 w-10 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/90 text-slate-300 shadow-lg backdrop-blur-md hover:text-white cursor-pointer"
+          title="Show HUD"
+        >
+          <Eye className="h-4 w-4" />
+        </button>
+      )}
+
       <CommentsSheet
-        isOpen={commentsOpen}
-        onClose={() => setCommentsOpen(false)}
         chapterId={chapter.id}
-        seriesId={chapter.seriesId}
+        seriesId={seriesId}
         currentUserId={userId}
         currentUsername={username}
+        isOpen={commentsOpen}
+        onClose={() => setCommentsOpen(false)}
       />
     </div>
   );

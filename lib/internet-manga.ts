@@ -1,9 +1,9 @@
 import { Chapter, PageImage, Series, SeriesOrigin, SeriesType } from './types';
 
-// Server-side cache for resolved MangaDex streaming pages and chapter feeds
+// Server-side cache for resolved MangaDex streaming pages and chapter feeds (with TTL)
 const chapterStreamCache = new Map<
   string,
-  { pages: PageImage[]; language?: string }
+  { pages: PageImage[]; language?: string; expiresAt: number }
 >();
 const seriesFeedCache = new Map<string, DiscoveredMangaDexChapter[]>();
 
@@ -23,13 +23,17 @@ export function buildProxiedImageUrl(
   theme: string = 'shadow',
   mode: 'cover' | 'page' = 'cover',
   chapterNum: number = 1,
-  pageNum: number = 1
+  pageNum: number = 1,
+  fallbackUrl?: string
 ): string {
   const base = `/api/image-proxy?url=${encodeURIComponent(rawUrl)}&title=${encodeURIComponent(
     title
   )}&type=${type}&theme=${theme}&mode=${mode}`;
   if (mode === 'page') {
-    return `${base}&chapter=${chapterNum}&page=${pageNum}`;
+    const withPage = `${base}&chapter=${chapterNum}&page=${pageNum}`;
+    return fallbackUrl
+      ? `${withPage}&fallbackUrl=${encodeURIComponent(fallbackUrl)}`
+      : withPage;
   }
   return base;
 }
@@ -108,13 +112,13 @@ export async function fetchLiveChaptersForSeries(
 
     // Tier 1: Hosted English chapters
     let candidates = await fetchFeed(
-      'translatedLanguage[]=en&order[chapter]=asc&limit=60&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica'
+      'translatedLanguage[]=en&order[chapter]=asc&limit=60&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic'
     );
 
     // Tier 2: When English is externally licensed, include all hosted raw/international chapters
     if (candidates.length < 3) {
       const allLangItems = await fetchFeed(
-        'order[chapter]=asc&limit=100&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica'
+        'order[chapter]=asc&limit=100&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic'
       );
       candidates = [...candidates, ...allLangItems];
     }
@@ -208,7 +212,7 @@ export async function resolveLiveChapterPages(
 
   const cacheKey = chapter.mangadexChapterId || chapter.id;
   const cached = chapterStreamCache.get(cacheKey);
-  if (cached && cached.pages.length > 0) {
+  if (cached && cached.pages.length > 0 && cached.expiresAt > Date.now()) {
     return {
       pages: cached.pages,
       isLiveStreamed: true,
@@ -244,11 +248,11 @@ export async function resolveLiveChapterPages(
       return { pages: chapter.pages, isLiveStreamed: false };
     }
 
-    // Fetch MangaDex At-Home streaming node URLs
+    // Fetch MangaDex At-Home streaming node URLs (forcePort443=true avoids blocked non-standard ports)
     const homeCtrl = new AbortController();
     const homeTimeout = setTimeout(() => homeCtrl.abort(), 6000);
     const homeRes = await fetch(
-      `https://api.mangadex.org/at-home/server/${targetMdChapterId}`,
+      `https://api.mangadex.org/at-home/server/${targetMdChapterId}?forcePort443=true`,
       {
         signal: homeCtrl.signal,
         headers: {
@@ -277,16 +281,37 @@ export async function resolveLiveChapterPages(
     }
 
     const livePages: PageImage[] = files.slice(0, 36).map((fileName, idx) => {
+      const pageNum = idx + 1;
       const rawPageUrl = `${baseUrl}/${folder}/${hash}/${fileName}`;
+      const uploadOriginUrl = `https://uploads.mangadex.org/${folder}/${hash}/${fileName}`;
+      const proxiedUrl = buildProxiedImageUrl(
+        rawPageUrl,
+        series.title,
+        series.type,
+        'shadow',
+        'page',
+        chapter.chapterNumber || 1,
+        pageNum,
+        uploadOriginUrl
+      );
       return {
-        pageNumber: idx + 1,
-        imageUrl: rawPageUrl,
-        caption: `Page ${idx + 1}`,
+        pageNumber: pageNum,
+        imageUrl: proxiedUrl,
+        caption: `Page ${pageNum}`,
       };
     });
 
-    chapterStreamCache.set(cacheKey, { pages: livePages, language: resolvedLang });
-    chapterStreamCache.set(chapter.id, { pages: livePages, language: resolvedLang });
+    const expiresAt = Date.now() + 10 * 60 * 1000;
+    chapterStreamCache.set(cacheKey, {
+      pages: livePages,
+      language: resolvedLang,
+      expiresAt,
+    });
+    chapterStreamCache.set(chapter.id, {
+      pages: livePages,
+      language: resolvedLang,
+      expiresAt,
+    });
     return { pages: livePages, isLiveStreamed: true, language: resolvedLang };
   } catch {
     return { pages: chapter.pages, isLiveStreamed: false };
@@ -327,7 +352,7 @@ export async function searchInternetCatalog(
       fetch(
         `https://api.mangadex.org/manga?title=${encodeURIComponent(
           trimmed
-        )}&limit=8&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive`,
+        )}&limit=8&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic`,
         {
           signal: ctrl.signal,
           headers: {

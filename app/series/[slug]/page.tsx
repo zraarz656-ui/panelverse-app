@@ -201,20 +201,10 @@ export default function SeriesDetailPage() {
                     <span className="text-slate-300 font-normal">{series.chineseTitle}</span>
                   </>
                 )}
-                {series.malayalamTitle && (
-                  <>
-                    <span aria-hidden="true" className="text-slate-600">
-                      ·
-                    </span>
-                    <span className="text-slate-400 font-normal">{series.malayalamTitle}</span>
-                  </>
-                )}
               </div>
 
               <h1 className="mt-2 text-2xl sm:text-3xl font-extrabold text-white tracking-tight text-balance">
-                {language === 'ml' && series.malayalamTitle
-                  ? series.malayalamTitle
-                  : series.title}
+                {series.title}
               </h1>
 
               {/* Unboxed Metadata */}

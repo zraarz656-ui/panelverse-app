@@ -1,426 +1,309 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
+  MessageSquare,
   ChevronLeft,
   ChevronRight,
-  MessageSquare,
-  Columns,
-  Square,
-  Repeat,
-  CheckCircle,
+  ArrowLeftRight,
 } from 'lucide-react';
-import { Chapter, Series } from '@/lib/types';
 import { CommentsSheet } from './CommentsSheet';
-import { useLanguage } from '@/context/LanguageContext';
-import { syncReadingProgressToFirestore } from '@/lib/supabase-sync';
+import { ResilientImage } from './ResilientImage';
+import { Chapter, Series, PageImage } from '@/lib/types';
 
 interface MangaReaderProps {
   chapter: Chapter & {
+    number?: number;
     series?: Series;
-    prevChapterId?: string;
-    nextChapterId?: string;
+    prevChapterId?: string | null;
+    nextChapterId?: string | null;
   };
-  userId: string;
-  username: string;
+  series?: Series;
+  prevChapterId?: string | null;
+  nextChapterId?: string | null;
+  userId?: string;
+  username?: string;
 }
 
-export function MangaReader({ chapter, userId, username }: MangaReaderProps) {
-  const router = useRouter();
-  const { language, t } = useLanguage();
-  const [currentPage, setCurrentPage] = useState(0);
-  const [direction, setDirection] = useState<'rtl' | 'ltr'>('rtl');
-  const [spreadMode, setSpreadMode] = useState<'single' | 'double'>('single');
-  const [showControls, setShowControls] = useState(true);
+export function MangaReader({
+  chapter,
+  series: seriesProp,
+  prevChapterId: prevChapterIdProp,
+  nextChapterId: nextChapterIdProp,
+  userId = 'guest',
+  username = 'GuestReader',
+}: MangaReaderProps) {
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rtl, setRtl] = useState(true);
+  const [hudVisible, setHudVisible] = useState(true);
   const [commentsOpen, setCommentsOpen] = useState(false);
-  const [failedPages, setFailedPages] = useState<Record<number, boolean>>({});
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const totalPages = chapter.pages.length;
-
-  const recordProgress = useCallback(
-    (pageIdx: number) => {
-      if (!chapter.series) return;
-      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-
-      saveTimeoutRef.current = setTimeout(async () => {
-        const pct = Math.round(((pageIdx + 1) / totalPages) * 100);
-        const payload = {
-          seriesId: chapter.seriesId,
-          chapterId: chapter.id,
-          chapterNumber: chapter.chapterNumber,
-          seriesTitle: chapter.series?.title || 'Manga',
-          seriesSlug: chapter.series?.slug || chapter.seriesId,
-          seriesType: 'manga' as const,
-          coverImage: chapter.series?.coverImage || '/placeholder.jpg',
-          pageIndex: pageIdx,
-          totalPages,
-          scrollPercentage: pct,
-          isCompleted: pageIdx >= totalPages - 1,
-        };
-
-        try {
-          await syncReadingProgressToFirestore(payload);
-        } catch (fsErr) {
-          console.error('Failed to sync manga progress to Firestore:', fsErr);
-        }
-
-        try {
-          await fetch('/api/progress', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId,
-              ...payload,
-            }),
-          });
-        } catch (err) {
-          console.error('Failed to update manga progress:', err);
-        }
-      }, 400);
-    },
-    [chapter, totalPages, userId]
+  const series = seriesProp || chapter?.series;
+  const seriesId = series?.id || chapter?.seriesId || 'unknown-series';
+  const seriesSlug = series?.slug || seriesId;
+  const seriesTitle = series?.title || 'Manga Series';
+  const coverImage = series?.coverImage || '';
+  const chapterNumber = chapter?.chapterNumber ?? chapter?.number ?? 1;
+  const rawChapterTitle = chapter?.title || `Chapter ${chapterNumber}`;
+  const cleanSubtitle = rawChapterTitle
+    .replace(/^(?:Episode|Chapter|Ep\.?|Ch\.?)\s*\d+\s*[:\-—]?\s*/i, '')
+    .trim();
+  const displayHeading = cleanSubtitle
+    ? `Ch. ${chapterNumber} — ${cleanSubtitle}`
+    : `Chapter ${chapterNumber}`;
+  const pages: PageImage[] = useMemo(
+    () => (Array.isArray(chapter.pages) ? chapter.pages : []),
+    [chapter.pages]
   );
+  const prevChapterId = prevChapterIdProp ?? chapter?.prevChapterId ?? null;
+  const nextChapterId = nextChapterIdProp ?? chapter?.nextChapterId ?? null;
+  const totalPages = Math.max(1, pages.length);
 
-  const advancePage = useCallback(() => {
-    setCurrentPage((prev) => {
-      const step = spreadMode === 'double' ? 2 : 1;
-      const next = Math.min(totalPages - 1, prev + step);
-      recordProgress(next);
-      return next;
-    });
-  }, [recordProgress, spreadMode, totalPages]);
+  const goNext = useCallback(() => {
+    setCurrentPage((p) => Math.min(totalPages, p + 1));
+  }, [totalPages]);
 
-  const retreatPage = useCallback(() => {
-    setCurrentPage((prev) => {
-      const step = spreadMode === 'double' ? 2 : 1;
-      const next = Math.max(0, prev - step);
-      recordProgress(next);
-      return next;
-    });
-  }, [recordProgress, spreadMode]);
-
-  const handleLeftTap = useCallback(() => {
-    if (direction === 'rtl') {
-      advancePage();
-    } else {
-      retreatPage();
-    }
-  }, [advancePage, direction, retreatPage]);
-
-  const handleRightTap = useCallback(() => {
-    if (direction === 'rtl') {
-      retreatPage();
-    } else {
-      advancePage();
-    }
-  }, [advancePage, direction, retreatPage]);
+  const goPrev = useCallback(() => {
+    setCurrentPage((p) => Math.max(1, p - 1));
+  }, []);
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (commentsOpen) return;
       if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        handleLeftTap();
+        if (rtl) goNext();
+        else goPrev();
       } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        handleRightTap();
-      } else if (e.key === ' ' || e.key === 'Spacebar') {
-        e.preventDefault();
-        advancePage();
+        if (rtl) goPrev();
+        else goNext();
       }
     };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [rtl, goNext, goPrev, commentsOpen]);
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [advancePage, handleLeftTap, handleRightTap]);
+  useEffect(() => {
+    if (pages.length === 0) return;
+    const scrollPercentage = Math.round((currentPage / totalPages) * 100);
+    fetch('/api/progress', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId,
+        seriesId,
+        chapterId: chapter.id,
+        chapterNumber,
+        seriesTitle,
+        seriesSlug,
+        seriesType: 'manga',
+        coverImage,
+        pageIndex: Math.max(0, currentPage - 1),
+        totalPages,
+        scrollPercentage,
+        isCompleted: currentPage >= totalPages,
+      }),
+    }).catch(() => {});
+  }, [
+    currentPage,
+    chapter.id,
+    chapterNumber,
+    pages.length,
+    seriesId,
+    seriesSlug,
+    seriesTitle,
+    coverImage,
+    totalPages,
+    userId,
+  ]);
 
-  const [proxyRetries, setProxyRetries] = useState<Record<number, boolean>>({});
+  const activePage = pages[currentPage - 1] || pages[0];
 
-  const activePage1 = chapter.pages[currentPage];
-  const activePage2 =
-    spreadMode === 'double' && currentPage + 1 < totalPages
-      ? chapter.pages[currentPage + 1]
-      : null;
-
-  const handlePageError = (pageNum: number, originalUrl: string) => {
-    if (!proxyRetries[pageNum] && originalUrl.startsWith('http')) {
-      setProxyRetries((prev) => ({ ...prev, [pageNum]: true }));
+  const handleZoneClick = (zone: 'left' | 'center' | 'right') => {
+    if (zone === 'center') {
+      setHudVisible((prev) => !prev);
+      return;
+    }
+    if (zone === 'left') {
+      if (rtl) goNext();
+      else goPrev();
     } else {
-      setFailedPages((prev) => ({ ...prev, [pageNum]: true }));
+      if (rtl) goPrev();
+      else goNext();
     }
-  };
-
-  const getPageSrc = (page: { pageNumber: number; imageUrl: string }) => {
-    const pageNum = page.pageNumber;
-    if (failedPages[pageNum]) {
-      return null;
-    }
-    if (proxyRetries[pageNum] && page.imageUrl.startsWith('http')) {
-      return `/api/image-proxy?url=${encodeURIComponent(page.imageUrl)}&title=${encodeURIComponent(
-        chapter.series?.title || 'Manga'
-      )}&type=manga&mode=page&chapter=${chapter.chapterNumber}&page=${pageNum}`;
-    }
-    return page.imageUrl;
   };
 
   return (
-    <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-neutral-950 text-slate-100 select-none">
-      {/* Top Floating Control Bar */}
+    <div className="flex min-h-screen flex-col bg-[#07070A] text-slate-100 select-none">
+      {/* Top HUD */}
       <header
-        className={`absolute top-0 left-0 right-0 z-40 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md transition-all duration-200 ${
-          showControls
-            ? 'translate-y-0 opacity-100'
-            : '-translate-y-full opacity-0 pointer-events-none'
+        className={`fixed top-0 left-0 right-0 z-40 bg-zinc-950/95 backdrop-blur-md border-b border-zinc-800/80 transition-transform duration-300 ${
+          hudVisible ? 'translate-y-0' : '-translate-y-full'
         }`}
       >
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
-          <div className="flex items-center gap-3">
+        <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4 gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <Link
-              href={chapter.series ? `/series/${chapter.series.slug}` : '/'}
-              className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
-              aria-label="Back to series"
+              href={`/series/${seriesSlug}`}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white"
             >
               <ArrowLeft className="h-4 w-4" />
             </Link>
-            <div className="flex flex-col">
-              <span className="text-xs font-semibold text-white truncate max-w-[180px] sm:max-w-xs">
-                {language === 'ml' && chapter.series?.malayalamTitle
-                  ? chapter.series.malayalamTitle
-                  : chapter.series?.title || 'Manga'}
-              </span>
-              <span className="text-[11px] text-slate-400 truncate max-w-[210px] sm:max-w-md">
-                {t.chapter} {chapter.chapterNumber} · {chapter.title}
-                {chapter.language ? ` · ${chapter.language}` : ''}
-                {chapter.isLiveStreamed ? ' · Live Stream' : ''}
-              </span>
+            <div className="min-w-0">
+              <p className="truncate text-xs text-slate-400">{seriesTitle}</p>
+              <h1 className="truncate text-sm font-bold text-white">
+                {displayHeading}
+              </h1>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* RTL / LTR Toggle */}
+          <div className="flex items-center gap-2 shrink-0">
             <button
-              type="button"
-              onClick={() => setDirection((prev) => (prev === 'rtl' ? 'ltr' : 'rtl'))}
-              title={`Reading Direction: ${direction.toUpperCase()}`}
-              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 text-xs font-semibold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+              onClick={() => setRtl((prev) => !prev)}
+              className="flex h-9 items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 font-mono text-xs font-semibold text-amber-300 hover:bg-amber-500/20 cursor-pointer"
+              title="Toggle Reading Direction"
             >
-              <Repeat className="h-3.5 w-3.5 text-rose-400" />
-              <span className="uppercase text-[11px] font-bold leading-none">{direction}</span>
+              <ArrowLeftRight className="h-3.5 w-3.5" />
+              <span>{rtl ? 'RTL (JP)' : 'LTR'}</span>
             </button>
-
-            {/* Spread Toggle */}
             <button
-              type="button"
-              onClick={() => setSpreadMode((prev) => (prev === 'single' ? 'double' : 'single'))}
-              title={`Page Mode: ${spreadMode}`}
-              className="hidden sm:inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
-            >
-              {spreadMode === 'single' ? (
-                <Square className="h-4 w-4" />
-              ) : (
-                <Columns className="h-4 w-4" />
-              )}
-            </button>
-
-            {/* Comments Drawer Button */}
-            <button
-              type="button"
               onClick={() => setCommentsOpen(true)}
-              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 text-xs font-medium text-slate-200 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+              className="flex h-9 items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 text-xs font-medium text-slate-200 hover:border-zinc-700 cursor-pointer"
             >
-              <MessageSquare className="h-3.5 w-3.5 text-rose-400" />
-              <span className="hidden sm:inline leading-none">{t.comments}</span>
+              <MessageSquare className="h-3.5 w-3.5 text-rose-500" />
+              <span className="hidden sm:inline">Comments</span>
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Paged Stage */}
-      <main className="relative flex flex-1 items-center justify-center overflow-hidden p-2 sm:p-4">
-        {/* Left Touch Zone (35%) */}
-        <div
-          onClick={handleLeftTap}
-          title={direction === 'rtl' ? 'Next Page' : 'Previous Page'}
-          className="absolute inset-y-0 left-0 w-[35%] z-20 cursor-w-resize"
-        />
+      {/* Main Paged Stage with 3-Zone Tap Overlay */}
+      <div className="relative flex flex-1 items-center justify-center pt-14 pb-20">
+        {activePage && (
+          <div className="relative mx-auto max-h-[82vh] max-w-[92vw] md:max-w-[720px] overflow-hidden rounded-lg shadow-2xl border border-zinc-900">
+            <ResilientImage
+              src={activePage.imageUrl}
+              alt={activePage.caption || `Page ${activePage.pageNumber}`}
+              className="max-h-[82vh] w-auto object-contain mx-auto"
+              fallbackTitle={seriesTitle}
+              fallbackType="manga"
+              fallbackMode="page"
+              chapterNumber={chapterNumber}
+              pageNumber={activePage.pageNumber}
+              priority
+            />
 
-        {/* Center Touch Zone (30% - toggles toolbar) */}
-        <div
-          onClick={() => setShowControls((prev) => !prev)}
-          title="Toggle Controls"
-          className="absolute inset-y-0 left-[35%] w-[30%] z-20 cursor-pointer"
-        />
-
-        {/* Right Touch Zone (35%) */}
-        <div
-          onClick={handleRightTap}
-          title={direction === 'rtl' ? 'Previous Page' : 'Next Page'}
-          className="absolute inset-y-0 right-0 w-[35%] z-20 cursor-e-resize"
-        />
-
-        {/* Canvas Render Area */}
-        <div
-          className={`flex h-full w-full max-w-5xl items-center justify-center gap-2 select-none ${
-            direction === 'rtl' ? 'flex-row-reverse' : 'flex-row'
-          }`}
-        >
-          {activePage1 && (
-            <div className="relative flex h-full w-full max-h-[86vh] items-center justify-center overflow-hidden rounded-lg bg-neutral-900 shadow-2xl border border-neutral-800">
-              {getPageSrc(activePage1) ? (
-                /* eslint-disable-next-line @next/next/no-img-element */
-                <img
-                  src={getPageSrc(activePage1)!}
-                  alt={`Page ${activePage1.pageNumber}`}
-                  referrerPolicy="no-referrer"
-                  onError={() => handlePageError(activePage1.pageNumber, activePage1.imageUrl)}
-                  className="max-h-[86vh] w-auto object-contain"
-                />
-              ) : (
-                <div className="flex flex-col items-center justify-center p-6 text-center">
-                  <p className="text-xs text-slate-400 font-mono">Page {activePage1.pageNumber}</p>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setFailedPages((prev) => {
-                        const next = { ...prev };
-                        delete next[activePage1.pageNumber];
-                        return next;
-                      });
-                      setProxyRetries((prev) => {
-                        const next = { ...prev };
-                        delete next[activePage1.pageNumber];
-                        return next;
-                      });
-                    }}
-                    className="mt-2 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500"
-                  >
-                    Reload Page
-                  </button>
-                </div>
-              )}
+            {/* 3-Zone Tap Targets */}
+            <div className="absolute inset-0 z-10 grid grid-cols-3">
+              <div
+                onClick={() => handleZoneClick('left')}
+                className="cursor-pointer"
+                title={rtl ? 'Next Page (RTL)' : 'Previous Page'}
+              />
+              <div
+                onClick={() => handleZoneClick('center')}
+                className="cursor-pointer"
+                title="Toggle HUD"
+              />
+              <div
+                onClick={() => handleZoneClick('right')}
+                className="cursor-pointer"
+                title={rtl ? 'Previous Page (RTL)' : 'Next Page'}
+              />
             </div>
-          )}
+          </div>
+        )}
+      </div>
 
-          {activePage2 && (
-            <div className="relative hidden md:flex h-full w-full max-h-[86vh] items-center justify-center overflow-hidden rounded-lg bg-neutral-900 shadow-2xl border border-neutral-800">
-              {getPageSrc(activePage2) ? (
-                /* eslint-disable-next-line @next/next/no-img-element */
-                <img
-                  src={getPageSrc(activePage2)!}
-                  alt={`Page ${activePage2.pageNumber}`}
-                  referrerPolicy="no-referrer"
-                  onError={() => handlePageError(activePage2.pageNumber, activePage2.imageUrl)}
-                  className="max-h-[86vh] w-auto object-contain"
-                />
-              ) : (
-                <div className="flex flex-col items-center justify-center p-6 text-center">
-                  <p className="text-xs text-slate-400 font-mono">Page {activePage2.pageNumber}</p>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setFailedPages((prev) => {
-                        const next = { ...prev };
-                        delete next[activePage2.pageNumber];
-                        return next;
-                      });
-                      setProxyRetries((prev) => {
-                        const next = { ...prev };
-                        delete next[activePage2.pageNumber];
-                        return next;
-                      });
-                    }}
-                    className="mt-2 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500"
-                  >
-                    Reload Page
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </main>
-
-      {/* Bottom Floating Bar */}
-      <footer
-        className={`absolute bottom-0 left-0 right-0 z-40 border-t border-slate-800 bg-slate-950/90 backdrop-blur-md transition-all duration-200 ${
-          showControls
-            ? 'translate-y-0 opacity-100'
-            : 'translate-y-full opacity-0 pointer-events-none'
+      {/* Bottom Scrubber HUD — docked flush to bottom of viewport */}
+      <div
+        className={`fixed bottom-0 left-0 right-0 z-40 bg-zinc-950/95 backdrop-blur-md border-t border-zinc-800/80 pb-safe transition-transform duration-300 ${
+          hudVisible ? 'translate-y-0' : 'translate-y-full'
         }`}
       >
-        <div className="mx-auto flex h-14 max-w-4xl items-center justify-between gap-4 px-4">
-          <button
-            type="button"
-            onClick={retreatPage}
-            disabled={currentPage === 0}
-            className="flex h-9 items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 text-xs font-medium text-slate-300 disabled:opacity-30 hover:bg-slate-800 transition-colors cursor-pointer"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            <span className="hidden sm:inline">Prev Page</span>
-          </button>
-
-          <div className="flex flex-1 items-center justify-center gap-3 max-w-sm">
-            <span className="text-xs font-mono tabular-nums text-slate-300 whitespace-nowrap">
-              {currentPage + 1} / {totalPages}
+        <div className="mx-auto flex max-w-4xl flex-col gap-2 px-4 py-3">
+          <div className="flex items-center justify-between text-xs font-mono text-slate-400">
+            <span>
+              {rtl
+                ? 'TAP LEFT FOR NEXT PAGE (RTL)'
+                : 'TAP RIGHT FOR NEXT PAGE (LTR)'}
             </span>
-            <input
-              type="range"
-              min="0"
-              max={Math.max(0, totalPages - 1)}
-              value={currentPage}
-              onChange={(e) => {
-                const val = Number(e.target.value);
-                setCurrentPage(val);
-                recordProgress(val);
-              }}
-              className="w-full accent-rose-500 cursor-pointer"
-            />
+            <span className="font-semibold text-white">
+              PAGE {currentPage} / {totalPages}
+            </span>
           </div>
 
-          {currentPage >= totalPages - 1 ? (
-            chapter.nextChapterId ? (
-              <button
-                type="button"
-                onClick={() => router.push(`/read/${chapter.nextChapterId}`)}
-                className="flex h-9 items-center gap-1.5 rounded-lg bg-rose-600 px-3 text-xs font-semibold text-white hover:bg-rose-500 transition-colors cursor-pointer"
-              >
-                <span>Next Ch.</span>
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            ) : (
-              <Link
-                href={chapter.series ? `/series/${chapter.series.slug}` : '/'}
-                className="flex h-9 items-center gap-1.5 rounded-lg bg-slate-800 px-3 text-xs font-semibold text-white hover:bg-slate-700 transition-colors"
-              >
-                <CheckCircle className="h-4 w-4 text-emerald-400" />
-                <span>Finished</span>
-              </Link>
-            )
-          ) : (
+          <div className="flex items-center gap-3">
             <button
-              type="button"
-              onClick={advancePage}
-              className="flex h-9 items-center gap-1.5 rounded-lg bg-slate-900 border border-slate-800 px-3 text-xs font-medium text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer"
+              onClick={rtl ? goNext : goPrev}
+              disabled={rtl ? currentPage >= totalPages : currentPage <= 1}
+              className="flex h-8 px-3 items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 text-xs font-medium text-slate-200 disabled:opacity-40 cursor-pointer"
             >
-              <span className="hidden sm:inline">Next Page</span>
-              <ChevronRight className="h-4 w-4" />
+              <ChevronLeft className="h-3.5 w-3.5" /> {rtl ? 'Next' : 'Prev'}
             </button>
+
+            <input
+              type="range"
+              min={1}
+              max={totalPages}
+              value={currentPage}
+              onChange={(e) => setCurrentPage(Number(e.target.value))}
+              dir={rtl ? 'rtl' : 'ltr'}
+              className="flex-1 accent-rose-500 cursor-pointer"
+            />
+
+            <button
+              onClick={rtl ? goPrev : goNext}
+              disabled={rtl ? currentPage <= 1 : currentPage >= totalPages}
+              className="flex h-8 px-3 items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 text-xs font-medium text-slate-200 disabled:opacity-40 cursor-pointer"
+            >
+              {rtl ? 'Prev' : 'Next'} <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {currentPage === totalPages && (
+            <div className="mt-1 flex items-center justify-between border-t border-zinc-800/80 pt-2">
+              <span className="text-xs text-rose-400 font-medium">
+                Reached final page of Chapter {chapterNumber}
+              </span>
+              <div className="flex items-center gap-2">
+                {prevChapterId && (
+                  <Link
+                    href={`/read/${prevChapterId}`}
+                    className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1 text-xs font-medium text-white"
+                  >
+                    Prev Ch.
+                  </Link>
+                )}
+                {nextChapterId ? (
+                  <Link
+                    href={`/read/${nextChapterId}`}
+                    className="rounded-lg bg-rose-600 px-3 py-1 text-xs font-semibold text-white hover:bg-rose-500"
+                  >
+                    Next Chapter →
+                  </Link>
+                ) : (
+                  <Link
+                    href={`/series/${seriesSlug}`}
+                    className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1 text-xs font-medium text-white"
+                  >
+                    Series Home
+                  </Link>
+                )}
+              </div>
+            </div>
           )}
         </div>
-      </footer>
+      </div>
 
       <CommentsSheet
-        isOpen={commentsOpen}
-        onClose={() => setCommentsOpen(false)}
         chapterId={chapter.id}
-        seriesId={chapter.seriesId}
+        seriesId={seriesId}
         currentUserId={userId}
         currentUsername={username}
+        isOpen={commentsOpen}
+        onClose={() => setCommentsOpen(false)}
       />
     </div>
   );

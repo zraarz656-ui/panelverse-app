@@ -5,18 +5,18 @@ import { LanguageProvider } from '@/context/LanguageContext';
 export const metadata: Metadata = {
   title: 'PanelVerse — Webtoon & Manga Reader',
   description:
-    'Next-generation webtoon and manga reader featuring continuous scroll webtoon mode, paged RTL manga mode, community comments, requests, and release schedule with Malayalam language support.',
+    'Next-generation webtoon and manga reader featuring continuous scroll webtoon mode, paged RTL manga mode, community comments, requests, and release schedule.',
   openGraph: {
     title: 'PanelVerse — Webtoon & Manga Reader',
     description:
-      'Next-generation webtoon and manga reader featuring continuous scroll webtoon mode, paged RTL manga mode, community comments, requests, and release schedule with Malayalam language support.',
+      'Next-generation webtoon and manga reader featuring continuous scroll webtoon mode, paged RTL manga mode, community comments, requests, and release schedule.',
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
     title: 'PanelVerse — Webtoon & Manga Reader',
     description:
-      'Next-generation webtoon and manga reader featuring continuous scroll webtoon mode, paged RTL manga mode, community comments, requests, and release schedule with Malayalam language support.',
+      'Next-generation webtoon and manga reader featuring continuous scroll webtoon mode, paged RTL manga mode, community comments, requests, and release schedule.',
   },
 };
 

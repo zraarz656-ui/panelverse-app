@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { BookOpen, User, Globe } from 'lucide-react';
+import { BookOpen, User } from 'lucide-react';
 import { useLanguage } from '@/context/LanguageContext';
 
 interface TopNavbarProps {
@@ -11,7 +11,7 @@ interface TopNavbarProps {
 
 export function TopNavbar({ username }: TopNavbarProps) {
   const pathname = usePathname();
-  const { language, toggleLanguage, t } = useLanguage();
+  const { t } = useLanguage();
 
   const navLinks = [
     { label: t.discover, href: '/' },
@@ -57,19 +57,8 @@ export function TopNavbar({ username }: TopNavbarProps) {
           })}
         </nav>
 
-        {/* Zone 3: Language Switcher & Profile CTA (Pixel-Perfect Alignment) */}
+        {/* Zone 3: Profile CTA */}
         <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
-          {/* Language Toggle */}
-          <button
-            type="button"
-            onClick={toggleLanguage}
-            title={language === 'en' ? 'Switch to Malayalam (മലയാളം)' : 'Switch to English'}
-            className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/90 px-3 text-xs font-semibold text-slate-200 hover:border-slate-700 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer select-none"
-          >
-            <Globe className="h-3.5 w-3.5 text-rose-400 shrink-0" />
-            <span className="font-sans leading-none">{language === 'en' ? 'മലയാളം' : 'EN'}</span>
-          </button>
-
           {/* User Profile / Library Link */}
           <Link
             href="/me"

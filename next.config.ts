@@ -6,6 +6,7 @@ export default function nextConfig(phase: string): NextConfig {
 
   return {
     distDir: isDev ? '.next-dev' : '.next',
+    devIndicators: false,
     reactStrictMode: true,
     productionBrowserSourceMaps: false,
     experimental: {

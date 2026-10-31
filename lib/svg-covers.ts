@@ -21,13 +21,24 @@ function escapeXml(raw: string): string {
 
 export function createCoverSvg(
   title: string,
-  theme: 'shadow' | 'cyberpunk' | 'celestial' | 'mecha' | 'cafe' | 'dungeon',
+  theme: 'shadow' | 'cyberpunk' | 'celestial' | 'mecha' | 'cafe' | 'dungeon' | string,
   type: 'webtoon' | 'manga'
 ): string {
   const safeTitle = escapeXml(safeSlice(title, 0, 24));
   const safeType = escapeXml(type.toUpperCase());
 
-  const themes = {
+  const themes: Record<
+    string,
+    {
+      bg1: string;
+      bg2: string;
+      accent: string;
+      accent2: string;
+      glow: string;
+      silhouette: string;
+      symbol: string;
+    }
+  > = {
     shadow: {
       bg1: '#090514',
       bg2: '#1b0d3a',
@@ -140,6 +151,129 @@ export function createCoverSvg(
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
+interface StoryBeat {
+  topLine: string;
+  bottomLine: string;
+  narration: string;
+  sfx: string;
+  krSfx: string;
+}
+
+function getSeriesStoryBeat(
+  seriesTitle: string,
+  chapterNum: number,
+  pageNum: number,
+  customDialogue?: string
+): StoryBeat {
+  const lower = seriesTitle.toLowerCase();
+
+  const soloBeats: StoryBeat[] = [
+    {
+      topLine: 'The Double Dungeon gate just sealed shut behind our raid party!',
+      bottomLine: 'Stay alert—the Giant Statue on the throne is looking right at us!',
+      narration: '[SYSTEM ALERT: SECRET QUEST — COURAGE OF THE WEAK]',
+      sfx: 'RUMBLE—!!',
+      krSfx: '쿠구구궁!!',
+    },
+    {
+      topLine: 'First Commandment: Worship the Lord! Everyone kneel immediately!',
+      bottomLine: 'Only those who decipher the altar rules will survive this chamber!',
+      narration: '[HEARTBEAT RATE CRITICAL · SURVIVAL INSTINCT ACTIVATED]',
+      sfx: 'FLASH—!!',
+      krSfx: '번쩍—!!',
+    },
+    {
+      topLine: '[Will you accept the Player Awakening? 0.02 seconds remaining.]',
+      bottomLine: 'If this System can make me stronger... I accept!',
+      narration: '[WELCOME, PLAYER SUNG JINWOO · LEVEL 1 AWAKENED]',
+      sfx: 'SURGE!!',
+      krSfx: '파아아앗!!',
+    },
+    {
+      topLine: 'Kasaka’s Poison Fang dagger equipped! Speed stat surging!',
+      bottomLine: 'Even a Boss-rank serpent cannot keep up with my new agility!',
+      narration: '[SKILL ACTIVATED: SPRINT LV. 2 · VITAL STRIKE]',
+      sfx: 'SLASH—!!',
+      krSfx: '서걱—!!',
+    },
+    {
+      topLine: 'Blood-Red Commander Igris guards the empty monarch throne.',
+      bottomLine: 'Put away the dagger—I will fight this knight barehanded!',
+      narration: '[JOB CHANGE QUEST: DEFEAT THE SHADOW GUARDIAN]',
+      sfx: 'CLANG!!',
+      krSfx: '카아앙!!',
+    },
+    {
+      topLine: 'Class Advancement Complete: Necromancer -> Monarch of Shadows!',
+      bottomLine: 'From the darkness of death, heed my command... "ARISE."',
+      narration: '[SHADOW EXTRACTION SUCCESSFUL · IGRIS HAS JOINED YOUR LEGION]',
+      sfx: 'ARISE!!',
+      krSfx: '일어나라!!',
+    },
+  ];
+
+  const genericWebtoonBeats: StoryBeat[] = [
+    {
+      topLine: customDialogue || `Episode ${chapterNum} opens as a fateful aura fills the air...`,
+      bottomLine: 'No one expected this encounter to change everything between us.',
+      narration: `[${seriesTitle.toUpperCase()} · EPISODE ${chapterNum} · SCENE ${pageNum}]`,
+      sfx: 'THUMP—!!',
+      krSfx: '두근—!!',
+    },
+    {
+      topLine: 'Wait—did you really think you could hide the truth from me?',
+      bottomLine: 'Every glance in this room carries an unspoken tension.',
+      narration: `[MOMENTS LATER · THE ATMOSPHERE GROWS INTENSE]`,
+      sfx: 'RUSTLE...',
+      krSfx: '스르륵...',
+    },
+    {
+      topLine: 'Step back! The barrier around the inner sanctum is shattering!',
+      bottomLine: 'If we don’t break through right now, there won’t be a second chance!',
+      narration: `[HIDDEN POWER AWAKENING · LIMIT RELEASED]`,
+      sfx: 'CRACK—!!',
+      krSfx: '콰아아앙!!',
+    },
+    {
+      topLine: 'I made a vow that I would never let anyone take what matters to me.',
+      bottomLine: 'Watch closely—this is the true strength I have been concealing!',
+      narration: `[CLIMAX SEQUENCE · EPISODE ${chapterNum} PANEL ${pageNum}]`,
+      sfx: 'WHOOSH!!',
+      krSfx: '슈우우욱!!',
+    },
+    {
+      topLine: 'Why is my heart racing like this just from hearing your voice?',
+      bottomLine: 'Don’t look away... tell me what you’re really thinking right now.',
+      narration: `[UNSPOKEN CONFESSION · BENEATH THE MOONLIGHT]`,
+      sfx: 'BA-DUMP!!',
+      krSfx: '쿵—!!',
+    },
+    {
+      topLine: 'The next trial awaits beyond this threshold.',
+      bottomLine: 'Whatever happens tomorrow, we face it together.',
+      narration: `[TO BE CONTINUED IN THE NEXT SCENE...]`,
+      sfx: 'SHING—!!',
+      krSfx: '챙—!!',
+    },
+  ];
+
+  const pool = lower.includes('solo leveling') ? soloBeats : genericWebtoonBeats;
+  const beat = pool[(pageNum + chapterNum - 2) % pool.length];
+
+  if (
+    customDialogue &&
+    !customDialogue.toLowerCase().includes('live streamed') &&
+    pageNum % 2 === 1
+  ) {
+    return {
+      ...beat,
+      topLine: customDialogue.replace(/^["']|["']$/g, ''),
+    };
+  }
+
+  return beat;
+}
+
 export function createReaderPanelSvg(
   seriesTitle: string,
   chapterNum: number,
@@ -148,82 +282,166 @@ export function createReaderPanelSvg(
   dialogue?: string
 ): string {
   const isWebtoon = type === 'webtoon';
-  const width = isWebtoon ? 800 : 700;
-  const height = isWebtoon ? 1200 : 1000;
-  const safeSeries = escapeXml(safeSlice(seriesTitle, 0, 36));
-  const rawDialogue = (dialogue || 'The gate has finally opened...!').replace(/^["']|["']$/g, '');
-  const safeLine1 = escapeXml(safeSlice(rawDialogue, 0, 46));
-  const safeLine2 = escapeXml(safeSlice(rawDialogue, 46, 92));
+  const width = isWebtoon ? 800 : 750;
+  const height = isWebtoon ? 1350 : 1060;
+  const safeSeries = escapeXml(safeSlice(seriesTitle, 0, 34));
+  const beat = getSeriesStoryBeat(seriesTitle, chapterNum, pageNum, dialogue);
+
+  const topLine1 = escapeXml(safeSlice(beat.topLine, 0, 48));
+  const topLine2 = escapeXml(safeSlice(beat.topLine, 48, 96));
+  const botLine1 = escapeXml(safeSlice(beat.bottomLine, 0, 48));
+  const botLine2 = escapeXml(safeSlice(beat.bottomLine, 48, 96));
+  const safeNarration = escapeXml(safeSlice(beat.narration, 0, 56));
+  const safeSfx = escapeXml(beat.sfx);
+  const safeKrSfx = escapeXml(beat.krSfx);
 
   if (isWebtoon) {
-    const bgColors = [
-      ['#090d16', '#1e1b4b', '#a855f7'],
-      ['#130a1e', '#311042', '#ec4899'],
-      ['#071a17', '#134e4a', '#10b981'],
-      ['#1a1209', '#431407', '#f59e0b'],
+    const palettes = [
+      { bg1: '#070913', bg2: '#181236', accent: '#a855f7', accent2: '#38bdf8', eye: '#c084fc' },
+      { bg1: '#120714', bg2: '#2d0f35', accent: '#ec4899', accent2: '#f43f5e', eye: '#f472b6' },
+      { bg1: '#061417', bg2: '#0f2f38', accent: '#06b6d4', accent2: '#10b981', eye: '#22d3ee' },
+      { bg1: '#140c08', bg2: '#2f190e', accent: '#f59e0b', accent2: '#ef4444', eye: '#fbbf24' },
     ];
-    const [c1, c2, accent] = bgColors[(pageNum - 1) % bgColors.length];
+    const pal = palettes[(pageNum + chapterNum - 2) % palettes.length];
+    const poseVariant = pageNum % 3;
 
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="100%" height="100%">
       <defs>
-        <linearGradient id="panelGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="${c1}"/>
-          <stop offset="100%" stop-color="${c2}"/>
+        <linearGradient id="bgG" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${pal.bg1}"/>
+          <stop offset="50%" stop-color="${pal.bg2}"/>
+          <stop offset="100%" stop-color="${pal.bg1}"/>
         </linearGradient>
-        <radialGradient id="auraGrad" cx="50%" cy="45%" r="50%">
-          <stop offset="0%" stop-color="${accent}" stop-opacity="0.45"/>
-          <stop offset="100%" stop-color="${c1}" stop-opacity="0"/>
+        <radialGradient id="auraG" cx="50%" cy="48%" r="52%">
+          <stop offset="0%" stop-color="${pal.accent}" stop-opacity="0.5"/>
+          <stop offset="100%" stop-color="${pal.bg1}" stop-opacity="0"/>
         </radialGradient>
+        <linearGradient id="slashG" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#ffffff"/>
+          <stop offset="50%" stop-color="${pal.accent}"/>
+          <stop offset="100%" stop-color="${pal.accent2}"/>
+        </linearGradient>
       </defs>
-      <rect width="${width}" height="${height}" fill="url(#panelGrad)"/>
 
-      <!-- Top Cinematic Action Frame -->
-      <rect x="36" y="44" width="728" height="510" rx="10" fill="#050811" stroke="${accent}" stroke-width="2" stroke-opacity="0.5"/>
-      <circle cx="400" cy="300" r="210" fill="url(#auraGrad)"/>
+      <rect width="${width}" height="${height}" fill="url(#bgG)"/>
 
-      <!-- Speed lines & Energy Geometry -->
-      <g stroke="${accent}" stroke-width="1.5" opacity="0.35">
-        <line x1="60" y1="80" x2="320" y2="250"/>
-        <line x1="740" y1="80" x2="480" y2="250"/>
-        <line x1="60" y1="510" x2="320" y2="340"/>
-        <line x1="740" y1="510" x2="480" y2="340"/>
+      <!-- PANEL 1: TOP CINEMATIC SCENE (y: 30 -> 460) -->
+      <g>
+        <rect x="36" y="30" width="728" height="430" rx="8" fill="#05070f" stroke="${pal.accent}" stroke-width="2" stroke-opacity="0.55"/>
+        <circle cx="430" cy="260" r="190" fill="url(#auraG)"/>
+
+        <!-- Dynamic Speed Lines -->
+        <g stroke="${pal.accent}" stroke-width="1.5" opacity="0.28">
+          <line x1="40" y1="50" x2="350" y2="230"/>
+          <line x1="760" y1="60" x2="490" y2="230"/>
+          <line x1="40" y1="440" x2="340" y2="280"/>
+          <line x1="760" y1="430" x2="500" y2="280"/>
+          <line x1="200" y1="30" x2="390" y2="210"/>
+          <line x1="620" y1="30" x2="450" y2="210"/>
+        </g>
+
+        <!-- Character Illustration in Panel 1 -->
+        ${
+          poseVariant === 0
+            ? `<g>
+                <polygon points="440,145 555,455 325,455" fill="#0b1120" stroke="${pal.accent}" stroke-width="2.5"/>
+                <polygon points="390,220 490,220 520,455 360,455" fill="#111827"/>
+                <circle cx="440" cy="145" r="42" fill="#0f172a" stroke="#e2e8f0" stroke-width="2.5"/>
+                <path d="M405 125 L430 142 L412 145 Z" fill="${pal.eye}"/>
+                <path d="M475 125 L450 142 L468 145 Z" fill="${pal.eye}"/>
+                <path d="M240 350 Q440 210 690 120" stroke="url(#slashG)" stroke-width="6" fill="none"/>
+              </g>`
+            : poseVariant === 1
+            ? `<g>
+                <polygon points="480,130 610,455 350,455" fill="#0f172a" stroke="${pal.accent2}" stroke-width="2.5"/>
+                <circle cx="480" cy="135" r="45" fill="#1e293b" stroke="#f8fafc" stroke-width="2.5"/>
+                <circle cx="464" cy="132" r="6" fill="${pal.eye}"/>
+                <circle cx="496" cy="132" r="6" fill="${pal.eye}"/>
+                <circle cx="480" cy="295" r="95" fill="none" stroke="${pal.accent2}" stroke-width="2" stroke-dasharray="10 6"/>
+              </g>`
+            : `<g>
+                <polygon points="330,160 445,455 225,455" fill="#0f172a" stroke="${pal.accent}" stroke-width="2"/>
+                <polygon points="540,145 655,455 435,455" fill="#1e1b4b" stroke="${pal.accent2}" stroke-width="2"/>
+                <circle cx="335" cy="140" r="36" fill="#0f172a" stroke="#f8fafc" stroke-width="2"/>
+                <circle cx="545" cy="128" r="38" fill="#0f172a" stroke="${pal.accent2}" stroke-width="2"/>
+                <line x1="380" y1="270" x2="500" y2="240" stroke="#ffffff" stroke-width="4"/>
+              </g>`
+        }
+
+        <!-- Speech Bubble 1 (Top-Left) -->
+        <rect x="58" y="54" width="470" height="${topLine2 ? 92 : 68}" rx="22" fill="#ffffff" stroke="#0f172a" stroke-width="3"/>
+        <polygon points="210,${topLine2 ? 146 : 122} 245,${topLine2 ? 176 : 150} 260,${topLine2 ? 146 : 122}" fill="#ffffff"/>
+        <text x="293" y="92" font-family="system-ui, sans-serif" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">
+          ${topLine1}
+        </text>
+        ${
+          topLine2
+            ? `<text x="293" y="118" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#334155" text-anchor="middle">${topLine2}</text>`
+            : ''
+        }
+
+        <!-- Korean SFX Callout -->
+        <text x="695" y="115" font-family="system-ui, sans-serif" font-size="28" font-weight="900" fill="${pal.eye}" text-anchor="end" opacity="0.9">
+          ${safeKrSfx}
+        </text>
+        <text x="695" y="142" font-family="system-ui, sans-serif" font-size="13" font-weight="800" fill="#f8fafc" text-anchor="end" letter-spacing="1.5">
+          ${safeSfx}
+        </text>
       </g>
 
-      <!-- Heroic Character Silhouette -->
-      <polygon points="400,155 495,380 445,380 420,515 380,515 355,380 305,380" fill="#0f172a" stroke="${accent}" stroke-width="2.5"/>
-      <circle cx="400" cy="130" r="34" fill="#0f172a" stroke="#f8fafc" stroke-width="2.5"/>
-      <circle cx="388" cy="126" r="5" fill="${accent}"/>
-      <circle cx="412" cy="126" r="5" fill="${accent}"/>
+      <!-- PANEL 2: MIDDLE DRAMATIC EYES CLOSE-UP & SYSTEM NARRATION (y: 490 -> 790) -->
+      <g>
+        <rect x="36" y="490" width="728" height="290" rx="8" fill="#03050a" stroke="${pal.accent2}" stroke-width="2" stroke-opacity="0.6"/>
+        <linearGradient id="eyeBand" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="#03050a"/>
+          <stop offset="50%" stop-color="${pal.bg2}"/>
+          <stop offset="100%" stop-color="#03050a"/>
+        </linearGradient>
+        <rect x="40" y="545" width="720" height="125" fill="url(#eyeBand)"/>
+        <line x1="40" y1="545" x2="760" y2="545" stroke="${pal.accent}" stroke-width="1.5" opacity="0.6"/>
+        <line x1="40" y1="670" x2="760" y2="670" stroke="${pal.accent}" stroke-width="1.5" opacity="0.6"/>
 
-      <!-- Speech Bubble 1 -->
-      <rect x="64" y="74" width="460" height="${safeLine2 ? 92 : 68}" rx="18" fill="#ffffff"/>
-      <polygon points="180,${safeLine2 ? 166 : 142} 210,${safeLine2 ? 192 : 168} 225,${safeLine2 ? 166 : 142}" fill="#ffffff"/>
-      <text x="294" y="114" font-family="system-ui, sans-serif" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">
-        ${safeLine1}
+        <!-- Intense Glowing Eyes Close-Up -->
+        <path d="M230 608 Q290 575 350 608 Q290 628 230 608 Z" fill="#0f172a" stroke="#e2e8f0" stroke-width="2.5"/>
+        <circle cx="295" cy="606" r="14" fill="${pal.eye}"/>
+        <circle cx="295" cy="606" r="5" fill="#ffffff"/>
+
+        <path d="M450 608 Q510 575 570 608 Q510 628 450 608 Z" fill="#0f172a" stroke="#e2e8f0" stroke-width="2.5"/>
+        <circle cx="505" cy="606" r="14" fill="${pal.eye}"/>
+        <circle cx="505" cy="606" r="5" fill="#ffffff"/>
+
+        <!-- System / Narration Window -->
+        <rect x="90" y="692" width="620" height="62" rx="10" fill="#090d1a" stroke="${pal.accent2}" stroke-width="2"/>
+        <text x="400" y="729" font-family="monospace, system-ui, sans-serif" font-size="14" font-weight="700" fill="#38bdf8" text-anchor="middle" letter-spacing="0.5">
+          ${safeNarration}
+        </text>
+      </g>
+
+      <!-- PANEL 3: BOTTOM CLIMAX & DIALOGUE (y: 820 -> 1290) -->
+      <g>
+        <rect x="36" y="820" width="728" height="465" rx="8" fill="#050811" stroke="${pal.accent}" stroke-width="2" stroke-opacity="0.5"/>
+        <polygon points="80,1280 400,855 720,1280" fill="${pal.accent}" opacity="0.18"/>
+        <circle cx="400" cy="1095" r="130" fill="none" stroke="${pal.accent2}" stroke-width="2" stroke-dasharray="12 8"/>
+        <path d="M240 1120 L400 940 L560 1120 L400 1245 Z" fill="#0b1120" stroke="${pal.accent}" stroke-width="2.5"/>
+
+        <!-- Speech Bubble 2 (Bottom Panel) -->
+        <rect x="195" y="852" width="535" height="${botLine2 ? 96 : 72}" rx="22" fill="#ffffff" stroke="#0f172a" stroke-width="3"/>
+        <polygon points="430,${botLine2 ? 948 : 924} 405,${botLine2 ? 980 : 954} 465,${botLine2 ? 948 : 924}" fill="#ffffff"/>
+        <text x="462" y="892" font-family="system-ui, sans-serif" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">
+          ${botLine1}
+        </text>
+        ${
+          botLine2
+            ? `<text x="462" y="918" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#334155" text-anchor="middle">${botLine2}</text>`
+            : ''
+        }
+      </g>
+
+      <!-- Episode Footer Strip -->
+      <text x="42" y="${height - 22}" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#94a3b8">
+        ${safeSeries} · Episode ${chapterNum}
       </text>
-      ${
-        safeLine2
-          ? `<text x="294" y="140" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#334155" text-anchor="middle">${safeLine2}</text>`
-          : ''
-      }
-
-      <!-- Bottom Dramatic Panel Frame -->
-      <rect x="36" y="590" width="728" height="530" rx="10" fill="#050811" stroke="#38bdf8" stroke-width="2" stroke-opacity="0.45"/>
-      <polygon points="100,1080 400,660 700,1080" fill="${accent}" opacity="0.22"/>
-      <circle cx="400" cy="870" r="115" fill="none" stroke="#38bdf8" stroke-width="2" stroke-dasharray="10 6"/>
-      <path d="M260 870 L400 730 L540 870 L400 1010 Z" fill="none" stroke="#f43f5e" stroke-width="2.5"/>
-
-      <!-- System / Narrative Caption Box -->
-      <rect x="210" y="625" width="515" height="78" rx="14" fill="#0f172a" stroke="#38bdf8" stroke-width="2"/>
-      <text x="467" y="670" font-family="system-ui, sans-serif" font-size="15" font-weight="700" fill="#f8fafc" text-anchor="middle">
-        [${safeSeries} · Episode ${chapterNum} · Scene ${pageNum}]
-      </text>
-
-      <!-- Footer -->
-      <text x="42" y="${height - 26}" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#94a3b8">
-        ${safeSeries} · Ep. ${chapterNum}
-      </text>
-      <text x="${width - 42}" y="${height - 26}" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e2e8f0" text-anchor="end">
+      <text x="${width - 42}" y="${height - 22}" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#e2e8f0" text-anchor="end">
         Panel ${pageNum}
       </text>
     </svg>`;
@@ -231,50 +449,65 @@ export function createReaderPanelSvg(
   } else {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="100%" height="100%">
       <rect width="${width}" height="${height}" fill="#f8fafc"/>
-      <rect x="32" y="32" width="${width - 64}" height="${height - 64}" fill="#ffffff" stroke="#0f172a" stroke-width="4"/>
-      <line x1="32" y1="470" x2="${width - 32}" y2="470" stroke="#0f172a" stroke-width="4"/>
-      <line x1="390" y1="470" x2="390" y2="${height - 32}" stroke="#0f172a" stroke-width="4"/>
+      <!-- Outer Manga Page Border -->
+      <rect x="28" y="28" width="${width - 56}" height="${height - 64}" fill="#ffffff" stroke="#0f172a" stroke-width="4"/>
 
-      <!-- Manga Speed Lines -->
-      <g stroke="#0f172a" stroke-width="1.5" opacity="0.25">
-        <line x1="40" y1="60" x2="340" y2="440"/>
-        <line x1="80" y1="60" x2="380" y2="440"/>
-        <line x1="120" y1="60" x2="420" y2="440"/>
-        <line x1="160" y1="60" x2="460" y2="440"/>
+      <!-- Manga Panel Dividers -->
+      <line x1="28" y1="430" x2="${width - 28}" y2="400" stroke="#0f172a" stroke-width="5"/>
+      <line x1="395" y1="414" x2="365" y2="${height - 36}" stroke="#0f172a" stroke-width="5"/>
+
+      <!-- Top Panel Speed Lines -->
+      <g stroke="#0f172a" stroke-width="1.5" opacity="0.22">
+        <line x1="40" y1="50" x2="320" y2="390"/>
+        <line x1="90" y1="50" x2="360" y2="390"/>
+        <line x1="140" y1="50" x2="400" y2="390"/>
+        <line x1="680" y1="50" x2="440" y2="390"/>
+        <line x1="630" y1="50" x2="410" y2="390"/>
       </g>
 
-      <!-- Character Silhouette -->
-      <polygon points="240,450 310,190 385,450" fill="#0f172a"/>
-      <circle cx="312" cy="145" r="36" fill="#0f172a"/>
+      <!-- Top Panel Character Ink Silhouette -->
+      <polygon points="210,415 295,155 385,410" fill="#0f172a"/>
+      <circle cx="295" cy="115" r="38" fill="#0f172a"/>
+      <path d="M275 112 L290 118 M305 118 L320 112" stroke="#ffffff" stroke-width="3"/>
 
-      <!-- Speech Balloon -->
-      <rect x="330" y="75" width="310" height="110" rx="40" fill="#ffffff" stroke="#0f172a" stroke-width="3"/>
-      <text x="485" y="122" font-family="system-ui, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">
-        ${safeLine1}
+      <!-- Right-Side Speech Balloon (RTL Manga Order) -->
+      <rect x="350" y="56" width="345" height="${topLine2 ? 105 : 82}" rx="36" fill="#ffffff" stroke="#0f172a" stroke-width="3.5"/>
+      <text x="522" y="96" font-family="system-ui, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">
+        ${topLine1}
       </text>
       ${
-        safeLine2
-          ? `<text x="485" y="148" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#334155" text-anchor="middle">${safeLine2}</text>`
+        topLine2
+          ? `<text x="522" y="122" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#334155" text-anchor="middle">${topLine2}</text>`
           : ''
       }
 
-      <!-- Bottom Left Impact Frame -->
-      <rect x="48" y="488" width="324" height="${height - 538}" fill="#0f172a"/>
-      <polygon points="105,540 315,540 210,850" fill="#ffffff"/>
-      <text x="210" y="700" font-family="system-ui, sans-serif" font-size="18" font-weight="900" fill="#0f172a" text-anchor="middle">
-        DOOOOOM!!
+      <!-- Bottom-Left Action Panel -->
+      <rect x="42" y="446" width="318" height="${height - 498}" fill="#0f172a"/>
+      <polygon points="85,490 325,490 205,910" fill="#ffffff"/>
+      <text x="200" y="675" font-family="system-ui, sans-serif" font-size="22" font-weight="900" fill="#0f172a" text-anchor="middle">
+        ${safeSfx}
+      </text>
+      <text x="200" y="715" font-family="system-ui, sans-serif" font-size="14" font-weight="800" fill="#334155" text-anchor="middle">
+        ${safeKrSfx}
       </text>
 
-      <!-- Bottom Right Frame -->
-      <ellipse cx="530" cy="690" rx="110" ry="70" fill="#ffffff" stroke="#0f172a" stroke-width="3"/>
-      <text x="530" y="695" font-family="system-ui, sans-serif" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">
+      <!-- Bottom-Right Dialogue & Character Panel -->
+      <circle cx="555" cy="790" r="88" fill="#e2e8f0" stroke="#0f172a" stroke-width="3"/>
+      <polygon points="480,1010 555,830 635,1010" fill="#0f172a"/>
+      <rect x="405" y="455" width="295" height="${botLine2 ? 105 : 82}" rx="32" fill="#ffffff" stroke="#0f172a" stroke-width="3"/>
+      <text x="552" y="495" font-family="system-ui, sans-serif" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">
+        ${botLine1}
+      </text>
+      ${
+        botLine2
+          ? `<text x="552" y="520" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#334155" text-anchor="middle">${botLine2}</text>`
+          : ''
+      }
+
+      <text x="36" y="${height - 12}" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#475569">
         ${safeSeries} · Ch. ${chapterNum}
       </text>
-
-      <text x="44" y="${height - 10}" font-family="system-ui, sans-serif" font-size="11" font-weight="600" fill="#475569">
-        ${safeSeries} · Chapter ${chapterNum}
-      </text>
-      <text x="${width - 44}" y="${height - 10}" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="#0f172a" text-anchor="end">
+      <text x="${width - 36}" y="${height - 12}" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="#0f172a" text-anchor="end">
         Page ${pageNum}
       </text>
     </svg>`;
