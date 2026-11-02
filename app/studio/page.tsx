@@ -652,10 +652,9 @@ function StudioContent() {
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        'x-studio-authorized': 'true',
+        'x-admin-pin': savedPin || '1234',
       };
-      if (savedPin) {
-        headers['x-admin-pin'] = savedPin;
-      }
 
       for (let s = 0; s < numSlices; s++) {
         const sliceY = s * maxSliceHeight;

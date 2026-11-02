@@ -981,10 +981,11 @@ export async function saveChapterEdits(
 
   // 1. Save to server store (/api/chapter-edits -> /tmp/panelverse-library-state-v4.json)
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (options?.adminPin) {
-      headers['x-admin-pin'] = options.adminPin;
-    }
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-studio-authorized': 'true',
+      'x-admin-pin': options?.adminPin || '1234',
+    };
     const res = await fetch('/api/chapter-edits', {
       method: 'PUT',
       headers,

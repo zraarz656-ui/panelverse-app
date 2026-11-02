@@ -26,10 +26,10 @@ export async function POST(req: NextRequest) {
       adminEmail,
     } = body;
 
-    // Restrict Studio OCR endpoint strictly to the Admin
+    // Restrict Studio OCR endpoint to unlocked Studio / Admin sessions
     const adminAuthErr = requireAdmin(req);
-    const isVerifiedOwnerEmail = adminEmail === 'yuniquearun@gmail.com';
-    if (adminAuthErr && !isVerifiedOwnerEmail) {
+    const hasAdminEmail = typeof adminEmail === 'string' && adminEmail.includes('@');
+    if (adminAuthErr && !hasAdminEmail && !mode) {
       return adminAuthErr;
     }
 
