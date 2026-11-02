@@ -10,10 +10,20 @@ import {
   Eye,
   EyeOff,
   ArrowUp,
+  Sparkles,
+  Layers,
+  Languages,
 } from 'lucide-react';
 import { CommentsSheet } from './CommentsSheet';
 import { ResilientImage } from './ResilientImage';
-import { Chapter, Series, PageImage } from '@/lib/types';
+import { getChapterEdits } from '@/lib/supabase-sync';
+import {
+  Chapter,
+  Series,
+  PageImage,
+  ChapterEditsData,
+  PanelCutBox,
+} from '@/lib/types';
 
 interface WebtoonReaderProps {
   chapter: Chapter & {
@@ -27,7 +37,15 @@ interface WebtoonReaderProps {
   nextChapterId?: string | null;
   userId?: string;
   username?: string;
+  isAdmin?: boolean;
 }
+
+const EDIT_LANGUAGES = [
+  { code: 'en', label: 'EN' },
+  { code: 'ml', label: 'ML' },
+  { code: 'hi', label: 'HI' },
+  { code: 'ta', label: 'TA' },
+];
 
 export function WebtoonReader({
   chapter,
@@ -36,12 +54,32 @@ export function WebtoonReader({
   nextChapterId: nextChapterIdProp,
   userId = 'guest',
   username = 'GuestReader',
+  isAdmin = false,
 }: WebtoonReaderProps) {
   const [hudVisible, setHudVisible] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const [commentsOpen, setCommentsOpen] = useState(false);
+  const [isPinAdmin, setIsPinAdmin] = useState(false);
+
+  // Pre-saved Studio Chapter Edits state (Zero-lag reader overlays)
+  const [editsByLang, setEditsByLang] = useState<Record<string, ChapterEditsData>>({});
+  const [activeEditLang, setActiveEditLang] = useState<string>('en');
+  const [showTranslatedOverlay, setShowTranslatedOverlay] = useState(true);
+  const [guidedPanelMode, setGuidedPanelMode] = useState(false);
+  const [activeGuidedIndex, setActiveGuidedIndex] = useState(0);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const lastSavedPage = useRef<number>(1);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      if (sessionStorage.getItem('panelverse_admin_auth') === 'true') {
+        Promise.resolve().then(() => setIsPinAdmin(true));
+      }
+    }
+  }, []);
+
+  const canAccessStudio = isAdmin || isPinAdmin;
 
   const series = seriesProp || chapter?.series;
   const seriesId = series?.id || chapter?.seriesId || 'unknown-series';
@@ -62,6 +100,69 @@ export function WebtoonReader({
   );
   const prevChapterId = prevChapterIdProp ?? chapter?.prevChapterId ?? null;
   const nextChapterId = nextChapterIdProp ?? chapter?.nextChapterId ?? null;
+
+  // Fetch published chapter_edits across supported languages on mount
+  useEffect(() => {
+    let isMounted = true;
+    async function loadSavedEdits() {
+      const found: Record<string, ChapterEditsData> = {};
+      await Promise.all(
+        EDIT_LANGUAGES.map(async ({ code }) => {
+          const data = await getChapterEdits(seriesId, chapter.id, code);
+          if (data && Array.isArray(data.pages) && data.pages.length > 0) {
+            const hasContent = data.pages.some(
+              (p) =>
+                (Array.isArray(p.speechBubbles) && p.speechBubbles.length > 0) ||
+                (Array.isArray(p.panelCuts) && p.panelCuts.length > 0)
+            );
+            if (hasContent) {
+              found[code] = data;
+            }
+          }
+        })
+      );
+      if (!isMounted) return;
+      setEditsByLang(found);
+      const availableCodes = Object.keys(found);
+      if (availableCodes.length > 0 && !found[activeEditLang]) {
+        setActiveEditLang(availableCodes[0]);
+      }
+    }
+    void loadSavedEdits();
+    return () => {
+      isMounted = false;
+    };
+  }, [seriesId, chapter.id, activeEditLang]);
+
+  const activeEdits: ChapterEditsData | null = editsByLang[activeEditLang] || null;
+  const availableLangCodes = useMemo(() => Object.keys(editsByLang), [editsByLang]);
+
+  const hasSpeechBubbles = useMemo(() => {
+    if (!activeEdits) return false;
+    return activeEdits.pages.some(
+      (p) => Array.isArray(p.speechBubbles) && p.speechBubbles.length > 0
+    );
+  }, [activeEdits]);
+
+  const orderedGuidedPanels = useMemo(() => {
+    if (!activeEdits) return [];
+    const list: { pageIndex: number; pageUrl: string; cut: PanelCutBox }[] = [];
+    activeEdits.pages.forEach((p) => {
+      const pageObj = pages[p.pageIndex];
+      if (!pageObj || !Array.isArray(p.panelCuts)) return;
+      const sorted = [...p.panelCuts].sort((a, b) => a.order - b.order);
+      sorted.forEach((cut) => {
+        list.push({
+          pageIndex: p.pageIndex,
+          pageUrl: pageObj.imageUrl,
+          cut,
+        });
+      });
+    });
+    return list;
+  }, [activeEdits, pages]);
+
+  const hasPanelCuts = orderedGuidedPanels.length > 0;
 
   useEffect(() => {
     const handleScroll = () => {
@@ -123,6 +224,8 @@ export function WebtoonReader({
     userId,
   ]);
 
+  const activeGuidedPanel = orderedGuidedPanels[activeGuidedIndex] || null;
+
   return (
     <div ref={containerRef} className="min-h-screen bg-[#07070A] text-slate-100 select-none">
       {/* Top Floating HUD */}
@@ -148,9 +251,79 @@ export function WebtoonReader({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            <span className="hidden sm:inline-block rounded-md bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-1 font-mono text-xs font-semibold text-emerald-400">
-              WEBTOON
-            </span>
+            {/* Zero-Lag Pre-Saved Translation Overlay Toggle (Only shown when chapter_edits exist) */}
+            {hasSpeechBubbles && (
+              <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-xs">
+                <button
+                  onClick={() => setShowTranslatedOverlay(false)}
+                  className={`rounded-md px-2 py-1 font-medium transition-colors cursor-pointer ${
+                    !showTranslatedOverlay
+                      ? 'bg-zinc-800 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Original
+                </button>
+                <button
+                  onClick={() => setShowTranslatedOverlay(true)}
+                  className={`flex items-center gap-1 rounded-md px-2 py-1 font-semibold transition-colors cursor-pointer ${
+                    showTranslatedOverlay
+                      ? 'bg-rose-600 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Languages className="h-3 w-3" />
+                  <span>Translated</span>
+                </button>
+                {availableLangCodes.length > 1 && showTranslatedOverlay && (
+                  <select
+                    value={activeEditLang}
+                    onChange={(e) => setActiveEditLang(e.target.value)}
+                    className="ml-1 bg-transparent pr-1 font-mono text-[11px] font-bold text-rose-300 focus:outline-none"
+                  >
+                    {availableLangCodes.map((code) => (
+                      <option key={code} value={code} className="bg-zinc-900 text-white">
+                        {code.toUpperCase()}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+
+            {/* Guided Panel-by-Panel Mode Toggle (Only shown when panelCuts exist) */}
+            {hasPanelCuts && (
+              <button
+                onClick={() => {
+                  setGuidedPanelMode((prev) => !prev);
+                  setActiveGuidedIndex(0);
+                }}
+                className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors cursor-pointer ${
+                  guidedPanelMode
+                    ? 'border-indigo-500/50 bg-indigo-600 text-white'
+                    : 'border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white'
+                }`}
+                title="Toggle Guided Panel-by-Panel View"
+              >
+                <Layers className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">
+                  {guidedPanelMode ? 'Panel View' : 'Full Strip'}
+                </span>
+              </button>
+            )}
+
+            {/* Strictly Owner-Only Studio Deep-Link Button */}
+            {canAccessStudio && (
+              <Link
+                href={`/studio?seriesId=${encodeURIComponent(seriesId)}&chapterId=${encodeURIComponent(chapter.id)}`}
+                className="flex h-9 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition-colors"
+                title="Open in Admin Translation & Panel Cut Studio"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-rose-400" />
+                <span className="hidden sm:inline">Studio</span>
+              </Link>
+            )}
+
             <button
               onClick={() => setCommentsOpen(true)}
               className="flex h-9 items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 text-xs font-medium text-slate-200 hover:border-zinc-700 cursor-pointer"
@@ -162,84 +335,187 @@ export function WebtoonReader({
         </div>
       </header>
 
-      {/* Seamless Vertical Webtoon Canvas */}
-      <div
-        onClick={() => setHudVisible((prev) => !prev)}
-        className="mx-auto max-w-[800px] pt-14 pb-20 cursor-pointer"
-      >
-        <div className="flex flex-col leading-none">
-          {pages.map((page, idx) => (
+      {/* Guided Panel-by-Panel Step View OR Seamless Vertical Webtoon Canvas */}
+      {guidedPanelMode && activeGuidedPanel ? (
+        <div className="mx-auto flex min-h-screen max-w-3xl flex-col items-center justify-center px-4 pt-16 pb-20">
+          <div className="mb-3 flex w-full items-center justify-between text-xs font-mono text-slate-400">
+            <span>
+              GUIDED PANEL {activeGuidedIndex + 1} / {orderedGuidedPanels.length}
+            </span>
+            <span>PAGE {activeGuidedPanel.pageIndex + 1}</span>
+          </div>
+
+          <div className="relative w-full overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
             <div
-              key={page.pageNumber || idx}
-              data-page-number={page.pageNumber}
-              className="relative w-full bg-zinc-950"
+              style={{
+                width: `${(100 / Math.max(1, activeGuidedPanel.cut.box.wPercent)) * 100}%`,
+                marginLeft: `-${
+                  (activeGuidedPanel.cut.box.xPercent /
+                    Math.max(1, activeGuidedPanel.cut.box.wPercent)) *
+                  100
+                }%`,
+                marginTop: `-${
+                  (activeGuidedPanel.cut.box.yPercent /
+                    Math.max(1, activeGuidedPanel.cut.box.wPercent)) *
+                  100
+                }%`,
+              }}
+              className="relative"
             >
               <ResilientImage
-                src={page.imageUrl}
-                alt={page.caption || `Page ${page.pageNumber}`}
+                src={activeGuidedPanel.pageUrl}
+                alt={`Guided Panel ${activeGuidedIndex + 1}`}
                 className="w-full h-auto block"
                 fallbackTitle={seriesTitle}
                 fallbackType="webtoon"
                 fallbackMode="page"
                 chapterNumber={chapterNumber}
-                pageNumber={page.pageNumber}
-                priority={idx < 2}
+                pageNumber={activeGuidedPanel.pageIndex + 1}
+                priority
               />
             </div>
-          ))}
-        </div>
+          </div>
 
-        {/* End of Episode Card */}
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="mx-4 mt-12 rounded-2xl border border-zinc-800/80 bg-zinc-900/60 p-6 text-center cursor-default"
-        >
-          <p className="text-xs font-semibold uppercase tracking-widest text-rose-400">
-            End of Episode {chapterNumber}
-          </p>
-          <h2 className="mt-1 text-xl font-bold text-white">
-            {cleanSubtitle || `Episode ${chapterNumber}`}
-          </h2>
-
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-            {prevChapterId ? (
-              <Link
-                href={`/read/${prevChapterId}`}
-                className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800/80 px-5 py-3 text-sm font-medium text-white hover:bg-zinc-800 transition-colors"
-              >
-                <ChevronLeft className="h-4 w-4" /> Previous Episode
-              </Link>
-            ) : (
-              <span className="flex items-center gap-2 rounded-xl border border-zinc-800/60 bg-zinc-900/40 px-5 py-3 text-sm font-medium text-slate-600">
-                <ChevronLeft className="h-4 w-4" /> First Episode
-              </span>
-            )}
-
+          <div className="mt-5 flex items-center gap-3">
             <button
-              onClick={() => setCommentsOpen(true)}
-              className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-medium text-slate-200 hover:bg-zinc-800 transition-colors cursor-pointer"
+              onClick={() => setActiveGuidedIndex((i) => Math.max(0, i - 1))}
+              disabled={activeGuidedIndex <= 0}
+              className="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-40 cursor-pointer"
             >
-              <MessageSquare className="h-4 w-4 text-rose-500" /> Episode Comments
+              <ChevronLeft className="h-4 w-4" /> Prev Panel
             </button>
-
-            {nextChapterId ? (
-              <Link
-                href={`/read/${nextChapterId}`}
-                className="flex items-center gap-2 rounded-xl bg-rose-600 px-6 py-3 text-sm font-semibold text-white hover:bg-rose-500 transition-colors shadow-lg shadow-rose-600/25"
-              >
-                Next Episode <ChevronRight className="h-4 w-4" />
-              </Link>
-            ) : (
-              <Link
-                href={`/series/${seriesSlug}`}
-                className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800 px-5 py-3 text-sm font-medium text-white"
-              >
-                Back to Series
-              </Link>
-            )}
+            <button
+              onClick={() => setGuidedPanelMode(false)}
+              className="rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs font-medium text-slate-300 hover:text-white cursor-pointer"
+            >
+              Exit Guided View
+            </button>
+            <button
+              onClick={() =>
+                setActiveGuidedIndex((i) =>
+                  Math.min(orderedGuidedPanels.length - 1, i + 1)
+                )
+              }
+              disabled={activeGuidedIndex >= orderedGuidedPanels.length - 1}
+              className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-40 cursor-pointer"
+            >
+              Next Panel <ChevronRight className="h-4 w-4" />
+            </button>
           </div>
         </div>
-      </div>
+      ) : (
+        <div
+          onClick={() => setHudVisible((prev) => !prev)}
+          className="mx-auto max-w-[800px] pt-14 pb-20 cursor-pointer"
+        >
+          <div className="flex flex-col leading-none">
+            {pages.map((page, idx) => {
+              const pageEdits = activeEdits?.pages.find(
+                (p) => p.pageIndex === idx
+              );
+              const bubbles =
+                showTranslatedOverlay && pageEdits?.speechBubbles
+                  ? pageEdits.speechBubbles
+                  : [];
+
+              return (
+                <div
+                  key={page.pageNumber || idx}
+                  data-page-number={page.pageNumber}
+                  style={{ containerType: 'inline-size' }}
+                  className="relative w-full bg-zinc-950"
+                >
+                  <ResilientImage
+                    src={page.imageUrl}
+                    alt={page.caption || `Page ${page.pageNumber}`}
+                    className="w-full h-auto block"
+                    fallbackTitle={seriesTitle}
+                    fallbackType="webtoon"
+                    fallbackMode="page"
+                    chapterNumber={chapterNumber}
+                    pageNumber={page.pageNumber}
+                    priority={idx < 2}
+                  />
+
+                  {/* Zero-Lag Pre-Computed Speech Bubble Overlays */}
+                  {bubbles.map((bubble) => (
+                    <div
+                      key={bubble.id}
+                      style={{
+                        left: `${bubble.box.xPercent}%`,
+                        top: `${bubble.box.yPercent}%`,
+                        width: `${bubble.box.wPercent}%`,
+                        height: `${bubble.box.hPercent}%`,
+                        backgroundColor: bubble.backgroundColor || '#ffffff',
+                        color: bubble.textColor || '#09090b',
+                        fontSize: `clamp(9px, ${(
+                          (bubble.fontSize || 14) * 0.18
+                        ).toFixed(2)}cqw, 26px)`,
+                      }}
+                      className="pointer-events-none absolute z-20 flex items-center justify-center rounded-md p-1 text-center font-bold leading-tight shadow-sm overflow-hidden break-words"
+                    >
+                      <span className="w-full break-words">
+                        {bubble.translatedText || bubble.originalText}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* End of Episode Card */}
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="mx-4 mt-12 rounded-2xl border border-zinc-800/80 bg-zinc-900/60 p-6 text-center cursor-default"
+          >
+            <p className="text-xs font-semibold uppercase tracking-widest text-rose-400">
+              End of Episode {chapterNumber}
+            </p>
+            <h2 className="mt-1 text-xl font-bold text-white">
+              {cleanSubtitle || `Episode ${chapterNumber}`}
+            </h2>
+
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              {prevChapterId ? (
+                <Link
+                  href={`/read/${prevChapterId}`}
+                  className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800/80 px-5 py-3 text-sm font-medium text-white hover:bg-zinc-800 transition-colors"
+                >
+                  <ChevronLeft className="h-4 w-4" /> Previous Episode
+                </Link>
+              ) : (
+                <span className="flex items-center gap-2 rounded-xl border border-zinc-800/60 bg-zinc-900/40 px-5 py-3 text-sm font-medium text-slate-600">
+                  <ChevronLeft className="h-4 w-4" /> First Episode
+                </span>
+              )}
+
+              <button
+                onClick={() => setCommentsOpen(true)}
+                className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-medium text-slate-200 hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                <MessageSquare className="h-4 w-4 text-rose-500" /> Episode Comments
+              </button>
+
+              {nextChapterId ? (
+                <Link
+                  href={`/read/${nextChapterId}`}
+                  className="flex items-center gap-2 rounded-xl bg-rose-600 px-6 py-3 text-sm font-semibold text-white hover:bg-rose-500 transition-colors shadow-lg shadow-rose-600/25"
+                >
+                  Next Episode <ChevronRight className="h-4 w-4" />
+                </Link>
+              ) : (
+                <Link
+                  href={`/series/${seriesSlug}`}
+                  className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800 px-5 py-3 text-sm font-medium text-white"
+                >
+                  Back to Series
+                </Link>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bottom Floating HUD — docked flush to bottom of viewport */}
       <div

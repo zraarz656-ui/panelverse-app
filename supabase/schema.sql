@@ -139,3 +139,21 @@ create policy "Public access comments" on public.comments for all using (true) w
 
 drop policy if exists "Public access requests" on public.requests;
 create policy "Public access requests" on public.requests for all using (true) with check (true);
+
+-- 7. PanelVerse Studio Pre-Translated Overlays & Panel Cuts Table
+create table if not exists public.chapter_edits (
+  id text primary key, -- format: "{series_id}_{chapter_id}_{lang}"
+  series_id text not null,
+  chapter_id text not null,
+  language_code text not null default 'en',
+  data jsonb not null default '{"version":1,"pages":[]}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_chapter_edits_chapter on public.chapter_edits(series_id, chapter_id);
+
+alter table public.chapter_edits enable row level security;
+
+drop policy if exists "Public access chapter_edits" on public.chapter_edits;
+create policy "Public access chapter_edits" on public.chapter_edits for all using (true) with check (true);
+

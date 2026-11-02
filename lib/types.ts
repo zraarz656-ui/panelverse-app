@@ -114,3 +114,47 @@ export interface ModerationReport {
   reportedAt: string;
   status: 'Pending' | 'Resolved' | 'Dismissed';
 }
+
+export interface NormalizedBox {
+  xPercent: number;
+  yPercent: number;
+  wPercent: number;
+  hPercent: number;
+}
+
+export interface SpeechBubbleOverlay {
+  id: string;
+  box: NormalizedBox;
+  originalText: string;
+  translatedText: string;
+  backgroundColor: string;
+  textColor: string;
+  fontSize: number;
+}
+
+export interface PanelCutBox {
+  id: string;
+  order: number;
+  box: NormalizedBox;
+}
+
+export interface PageEditData {
+  pageIndex: number;
+  speechBubbles: SpeechBubbleOverlay[];
+  panelCuts: PanelCutBox[];
+}
+
+export interface ChapterEditsData {
+  version: number;
+  pages: PageEditData[];
+}
+
+export interface ChapterEditRecord {
+  id: string; // format: "{seriesId}_{chapterId}_{languageCode}"
+  seriesId: string;
+  chapterId: string;
+  languageCode: string;
+  data: ChapterEditsData;
+  updatedAt: string;
+}
+

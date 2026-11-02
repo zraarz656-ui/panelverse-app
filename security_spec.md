@@ -15,9 +15,9 @@
    - A comment or series request cannot be created unless its `authorId` matches `request.auth.uid` AND the referenced user profile `/users/{authorId}` exists (`exists()`).
 5. **Terminal State Locking (`requests/{requestId}`)**:
    - Once a `SeriesRequest` reaches the terminal status `'Acquired'`, no non-admin updates are permitted (`existing().status != 'Acquired' || isAdmin()`).
-6. **Admin Library Catalog & Chapter Persistence (`series/{seriesId}` & `chapters/{chapterId}`)**:
-   - Public catalog reads (`get`, `list`) are bounded by resource field validation (`existing().title.size() >= 1 && existing().totalViews >= 0` for series, `existing().title.size() >= 1 && existing().views >= 0` for chapters).
-   - Creation, updates, and deletion of `/series/{seriesId}` and `/chapters/{chapterId}` are strictly restricted to verified administrators (`isAdmin()`) with strict key allowlists (`hasAll` + `hasOnly`), bounded arrays (`genres.size() <= 12`, `pageUrls.size() <= 60`), and immutable identity/creation timestamps (`id`, `seriesId`, `createdAt`).
+6. **Admin Library Catalog, Chapter Persistence & Studio Chapter Edits (`series/{seriesId}`, `chapters/{chapterId}`, & `chapter_edits/{editId}`)**:
+   - Public catalog and translation overlay reads (`get`, `list`) are bounded by resource field validation (`existing().title.size() >= 1 && existing().totalViews >= 0` for series, `existing().title.size() >= 1 && existing().views >= 0` for chapters, `existing().version == 1` for chapter_edits).
+   - Creation, updates, and deletion of `/series/{seriesId}`, `/chapters/{chapterId}`, and `/chapter_edits/{editId}` are strictly restricted to verified administrators (`isAdmin()`) with strict key allowlists (`hasAll` + `hasOnly`), bounded arrays (`genres.size() <= 12`, `pageUrls.size() <= 60`, `pages.size() <= 60`), and immutable identity/creation timestamps (`id`, `seriesId`, `chapterId`, `createdAt`).
 7. **Temporal Integrity & Immutable Fields**:
    - All `createdAt` and `updatedAt` fields must equal `request.time` on creation, and `createdAt` + ownership identifiers (`uid`, `userId`, `authorId`, `seriesId`, `chapterId`, `id`) are strictly immutable on update (`incoming().updatedAt == request.time`).
 

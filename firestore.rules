@@ -208,6 +208,27 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    function isValidChapterEdit(data) {
+      return data.keys().hasAll([
+          'id', 'seriesId', 'chapterId', 'languageCode',
+          'version', 'pages', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'seriesId', 'chapterId', 'languageCode',
+          'version', 'pages', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.seriesId) &&
+        isValidId(data.chapterId) &&
+        data.languageCode is string && data.languageCode.size() >= 2 && data.languageCode.size() <= 8 &&
+        (data.languageCode == 'en' || data.languageCode == 'ml' || data.languageCode == 'hi' || data.languageCode == 'ta') &&
+        data.version is number && data.version == 1 &&
+        data.pages is list && data.pages.size() <= 60 &&
+        (data.pages.size() == 0 || (data.pages[0] is map && data.pages[0].pageIndex is number)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // 4. Collection Rules
 
     // Public User Profiles (No PII)
@@ -315,7 +336,7 @@ service cloud.firestore {
 
     // Episode & Chapter Comments
     match /comments/{commentId} {
-      allow get: if isValidId(commentId) && existing().content.size() >= 1;
+      allow get: if isValidId(commentId) && (resource == null || existing().content.size() >= 1);
       allow list: if existing().upvotes >= 0;
 
       allow create: if isVerifiedUser() &&
@@ -357,7 +378,7 @@ service cloud.firestore {
 
     // Community Series Requests & Votes
     match /requests/{requestId} {
-      allow get: if isValidId(requestId) && existing().title.size() >= 1;
+      allow get: if isValidId(requestId) && (resource == null || existing().title.size() >= 1);
       allow list: if existing().votes >= 0;
 
       allow create: if isVerifiedUser() &&
@@ -399,7 +420,7 @@ service cloud.firestore {
 
     // Persisted Series Catalog Overrides & Creations
     match /series/{seriesId} {
-      allow get: if isValidId(seriesId) && existing().title.size() >= 1;
+      allow get: if isValidId(seriesId) && (resource == null || existing().title.size() >= 1);
       allow list: if existing().totalViews >= 0;
 
       allow create: if isAdmin() &&
@@ -429,7 +450,7 @@ service cloud.firestore {
 
     // Persisted Chapter Metadata & Custom Panel Image URLs
     match /chapters/{chapterId} {
-      allow get: if isValidId(chapterId) && existing().title.size() >= 1;
+      allow get: if isValidId(chapterId) && (resource == null || existing().title.size() >= 1);
       allow list: if existing().views >= 0;
 
       allow create: if isAdmin() &&
@@ -469,6 +490,36 @@ service cloud.firestore {
 
       allow update: if false;
       allow delete: if isValidId(adminId) && isAdmin();
+    }
+
+    // Studio Pre-Translated Speech Bubble Overlays & Guided Panel Cuts
+    match /chapter_edits/{editId} {
+      allow get: if isValidId(editId) && (resource == null || existing().version == 1);
+      allow list: if existing().version == 1;
+
+      allow create: if isAdmin() &&
+        isValidId(editId) &&
+        isValidChapterEdit(incoming()) &&
+        incoming().id == editId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isAdmin() &&
+        isValidId(editId) &&
+        isValidChapterEdit(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().seriesId == existing().seriesId &&
+        incoming().chapterId == existing().chapterId &&
+        incoming().languageCode == existing().languageCode &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'version', 'pages', 'updatedAt'
+          ])
+        );
+
+      allow delete: if isValidId(editId) && isAdmin();
     }
   }
 }

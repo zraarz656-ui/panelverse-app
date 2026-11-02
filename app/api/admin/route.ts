@@ -128,13 +128,39 @@ export async function POST(req: NextRequest) {
         ? panelUrls.map((u: string) => String(u).trim()).filter(Boolean)
         : undefined;
 
-      const updatedChapter = dataStore.updateChapter(chapterId, {
+      let updatedChapter = dataStore.updateChapter(chapterId, {
         chapterNumber: chapterNumber !== undefined ? Number(chapterNumber) : undefined,
         title: title !== undefined ? String(title).trim() : undefined,
         releaseDate: releaseDate !== undefined ? String(releaseDate).trim() : undefined,
         panelUrls: cleanedUrls && cleanedUrls.length > 0 ? cleanedUrls : undefined,
         pages: Array.isArray(customPages) && customPages.length > 0 ? customPages : undefined,
       });
+
+      if (!updatedChapter && seriesId) {
+        const fallbackPages =
+          Array.isArray(customPages) && customPages.length > 0
+            ? customPages
+            : cleanedUrls && cleanedUrls.length > 0
+            ? cleanedUrls.map((url: string, idx: number) => ({
+                pageNumber: idx + 1,
+                imageUrl: url,
+                caption: `Panel ${idx + 1}`,
+              }))
+            : [];
+
+        updatedChapter = dataStore.addChapter({
+          id: String(chapterId),
+          seriesId: String(seriesId),
+          chapterNumber: Number(chapterNumber) || 1,
+          title: String(title || 'Episode').trim(),
+          releaseDate: String(releaseDate || 'Updated').trim(),
+          views: 1,
+          pages: fallbackPages,
+          pagesCount: fallbackPages.length,
+          hasCustomPages: true,
+          isCustomEdited: true,
+        });
+      }
 
       if (!updatedChapter) {
         return NextResponse.json({ error: 'Chapter not found' }, { status: 404 });

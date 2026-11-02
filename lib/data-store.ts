@@ -9,6 +9,7 @@ import {
   ModerationReport,
   SeriesOrigin,
   SeriesType,
+  ChapterEditRecord,
 } from './types';
 import { createCoverSvg, createReaderPanelSvg } from './svg-covers';
 import { buildProxiedImageUrl, DiscoveredMangaDexChapter } from './internet-manga';
@@ -20,6 +21,7 @@ interface PersistedLibraryState {
   deletedSeriesIds: string[];
   chapterOverrides: Record<string, Chapter>;
   deletedChapterIds: string[];
+  chapterEdits?: Record<string, ChapterEditRecord>;
 }
 
 class DatabaseStore {
@@ -35,6 +37,7 @@ class DatabaseStore {
   private deletedSeriesIds: Set<string> = new Set();
   private chapterOverrides: Map<string, Chapter> = new Map();
   private deletedChapterIds: Set<string> = new Set();
+  private chapterEdits: Map<string, ChapterEditRecord> = new Map();
 
   constructor() {
     this.seedInitialData();
@@ -91,6 +94,14 @@ class DatabaseStore {
         }
       }
 
+      if (parsed.chapterEdits && typeof parsed.chapterEdits === 'object') {
+        for (const [id, editRec] of Object.entries(parsed.chapterEdits)) {
+          if (editRec && editRec.id) {
+            this.chapterEdits.set(id, editRec);
+          }
+        }
+      }
+
       this.recomputeSeriesChapterCounts();
     } catch (e) {
       console.error('Failed to load persisted library state:', e);
@@ -104,6 +115,7 @@ class DatabaseStore {
         deletedSeriesIds: Array.from(this.deletedSeriesIds),
         chapterOverrides: Object.fromEntries(this.chapterOverrides.entries()),
         deletedChapterIds: Array.from(this.deletedChapterIds),
+        chapterEdits: Object.fromEntries(this.chapterEdits.entries()),
       };
       fs.writeFileSync(PERSIST_STATE_FILE, JSON.stringify(payload), 'utf-8');
     } catch (e) {
@@ -2868,6 +2880,27 @@ class DatabaseStore {
       return false;
     }
     return true;
+  }
+
+  // Chapter Edits (PanelVerse Studio)
+  public getChapterEdit(editId: string): ChapterEditRecord | null {
+    return this.chapterEdits.get(editId) || null;
+  }
+
+  public getChapterEditsForChapter(seriesId: string, chapterId: string): ChapterEditRecord[] {
+    const results: ChapterEditRecord[] = [];
+    for (const rec of this.chapterEdits.values()) {
+      if (rec.seriesId === seriesId && rec.chapterId === chapterId) {
+        results.push(rec);
+      }
+    }
+    return results;
+  }
+
+  public saveChapterEdit(record: ChapterEditRecord): ChapterEditRecord {
+    this.chapterEdits.set(record.id, record);
+    this.savePersistedState();
+    return record;
   }
 }
 

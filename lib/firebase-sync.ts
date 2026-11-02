@@ -20,7 +20,15 @@ import {
   sanitizeFirestoreId,
   VALIDATION_RULES,
 } from './firebase';
-import { Comment, ReadingProgress, SeriesRequest, Series, Chapter } from './types';
+import {
+  Comment,
+  ReadingProgress,
+  SeriesRequest,
+  Series,
+  Chapter,
+  ChapterEditsData,
+  PageEditData,
+} from './types';
 
 function formatTimestamp(val: unknown): string {
   if (val instanceof Timestamp) {
@@ -672,3 +680,120 @@ export function mergeChaptersWithFirestore(
 
   return Array.from(map.values()).sort((a, b) => a.chapterNumber - b.chapterNumber);
 }
+
+/**
+ * Chapter Edits Firestore Sync (/chapter_edits/{seriesId}_{chapterId}_{languageCode})
+ */
+export async function getChapterEditsFromFirestore(
+  seriesId: string,
+  chapterId: string,
+  languageCode = 'en'
+): Promise<ChapterEditsData | null> {
+  const safeSeriesId = sanitizeFirestoreId(seriesId);
+  const safeChapterId = sanitizeFirestoreId(chapterId);
+  const safeLang = ['en', 'ml', 'hi', 'ta'].includes(languageCode) ? languageCode : 'en';
+  const editId = sanitizeFirestoreId(`${safeSeriesId}_${safeChapterId}_${safeLang}`);
+  const path = `chapter_edits/${editId}`;
+  const ref = doc(db, 'chapter_edits', editId);
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return null;
+    const raw = snap.data();
+    const pages: PageEditData[] = Array.isArray(raw.pages) ? (raw.pages as PageEditData[]) : [];
+    return {
+      version: Number(raw.version || 1),
+      pages,
+    };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, path);
+  }
+}
+
+export async function saveChapterEditsToFirestore(
+  seriesId: string,
+  chapterId: string,
+  languageCode: string,
+  data: ChapterEditsData
+): Promise<boolean> {
+  const currentUser = auth.currentUser;
+  if (!currentUser || !currentUser.emailVerified) return false;
+
+  const safeSeriesId = sanitizeFirestoreId(seriesId);
+  const safeChapterId = sanitizeFirestoreId(chapterId);
+  const safeLang = ['en', 'ml', 'hi', 'ta'].includes(languageCode) ? languageCode : 'en';
+  const editId = sanitizeFirestoreId(`${safeSeriesId}_${safeChapterId}_${safeLang}`);
+  const path = `chapter_edits/${editId}`;
+  const ref = doc(db, 'chapter_edits', editId);
+
+  const safePages: PageEditData[] = (Array.isArray(data.pages) ? data.pages : [])
+    .slice(0, 60)
+    .map((p, idx) => ({
+      pageIndex: typeof p.pageIndex === 'number' ? p.pageIndex : idx,
+      speechBubbles: Array.isArray(p.speechBubbles)
+        ? p.speechBubbles.map((b, bIdx) => ({
+            id: String(b.id || `b_${bIdx}`),
+            box: {
+              xPercent: Number(b.box?.xPercent ?? 10),
+              yPercent: Number(b.box?.yPercent ?? 10),
+              wPercent: Number(b.box?.wPercent ?? 25),
+              hPercent: Number(b.box?.hPercent ?? 15),
+            },
+            originalText: String(b.originalText || '').slice(0, 1000),
+            translatedText: String(b.translatedText || '').slice(0, 1000),
+            backgroundColor: String(b.backgroundColor || '#ffffff').slice(0, 32),
+            textColor: String(b.textColor || '#000000').slice(0, 32),
+            fontSize: Number(b.fontSize || 14),
+          }))
+        : [],
+      panelCuts: Array.isArray(p.panelCuts)
+        ? p.panelCuts.map((c, cIdx) => ({
+            id: String(c.id || `p_${cIdx}`),
+            order: Number(c.order ?? cIdx + 1),
+            box: {
+              xPercent: Number(c.box?.xPercent ?? 0),
+              yPercent: Number(c.box?.yPercent ?? 0),
+              wPercent: Number(c.box?.wPercent ?? 100),
+              hPercent: Number(c.box?.hPercent ?? 50),
+            },
+          }))
+        : [],
+    }));
+
+  try {
+    const existingSnap = await getDoc(ref);
+    if (!existingSnap.exists()) {
+      try {
+        await setDoc(ref, {
+          id: editId,
+          seriesId: safeSeriesId,
+          chapterId: safeChapterId,
+          languageCode: safeLang,
+          version: 1,
+          pages: safePages,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (createErr) {
+        handleFirestoreError(createErr, OperationType.CREATE, path);
+      }
+    } else {
+      try {
+        await updateDoc(ref, {
+          version: 1,
+          pages: safePages,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (updateErr) {
+        handleFirestoreError(updateErr, OperationType.UPDATE, path);
+      }
+    }
+    return true;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('{"error":')) {
+      throw err;
+    }
+    handleFirestoreError(err, OperationType.GET, path);
+  }
+}
+

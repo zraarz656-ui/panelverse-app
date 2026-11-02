@@ -23,10 +23,19 @@ import {
   subscribeLibraryChaptersFromFirestore as fallbackSubscribeChapters,
   mergeSeriesWithFirestore,
   mergeChaptersWithFirestore,
+  getChapterEditsFromFirestore as fallbackGetChapterEdits,
+  saveChapterEditsToFirestore as fallbackSaveChapterEdits,
   PersistedSeriesRecord,
   PersistedChapterRecord,
 } from './firebase-sync';
-import { Comment, ReadingProgress, SeriesRequest, Series, Chapter } from './types';
+import {
+  Comment,
+  ReadingProgress,
+  SeriesRequest,
+  Series,
+  Chapter,
+  ChapterEditsData,
+} from './types';
 
 export type { PersistedSeriesRecord, PersistedChapterRecord };
 
@@ -894,3 +903,142 @@ export const subscribeLibraryChaptersFromFirestore = subscribeLibraryChaptersFro
 export const mergeSeriesWithSupabase = mergeSeriesWithFirestore;
 export const mergeChaptersWithSupabase = mergeChaptersWithFirestore;
 export { mergeSeriesWithFirestore, mergeChaptersWithFirestore };
+
+/**
+ * 6. Studio Pre-Translated Speech Bubble Overlays & Panel Cuts (chapter_edits)
+ * Shared Data Contract: ID = "{seriesId}_{chapterId}_{languageCode}"
+ */
+export async function getChapterEdits(
+  seriesId: string,
+  chapterId: string,
+  languageCode = 'en'
+): Promise<ChapterEditsData | null> {
+  const safeSeriesId = sanitizeFirestoreId(seriesId);
+  const safeChapterId = sanitizeFirestoreId(chapterId);
+  const safeLang = ['en', 'ml', 'hi', 'ta'].includes(languageCode) ? languageCode : 'en';
+  const editId = sanitizeFirestoreId(`${safeSeriesId}_${safeChapterId}_${safeLang}`);
+
+  // 1. Check fast server store first (/api/chapter-edits)
+  try {
+    const res = await fetch(
+      `/api/chapter-edits?seriesId=${encodeURIComponent(safeSeriesId)}&chapterId=${encodeURIComponent(safeChapterId)}&lang=${encodeURIComponent(safeLang)}`
+    );
+    if (res.ok) {
+      const json = await res.json();
+      if (json?.record?.data && Array.isArray(json.record.data.pages)) {
+        return json.record.data as ChapterEditsData;
+      }
+    }
+  } catch {
+    // Continue to cloud stores
+  }
+
+  // 2. Check Supabase chapter_edits table
+  try {
+    const supabase = createSupabaseBrowserClient();
+    const { data, error } = await supabase
+      .from('chapter_edits')
+      .select('data')
+      .eq('id', editId)
+      .maybeSingle();
+
+    if (!error && data?.data && typeof data.data === 'object') {
+      const parsed = data.data as ChapterEditsData;
+      if (Array.isArray(parsed.pages)) {
+        return parsed;
+      }
+    }
+  } catch {
+    // Fallback to Firestore
+  }
+
+  // 3. Fallback to Firebase Firestore chapter_edits collection
+  try {
+    const fsData = await fallbackGetChapterEdits(safeSeriesId, safeChapterId, safeLang);
+    if (fsData && Array.isArray(fsData.pages)) {
+      return fsData;
+    }
+  } catch {
+    // Ignore if unavailable
+  }
+
+  return null;
+}
+
+export async function saveChapterEdits(
+  seriesId: string,
+  chapterId: string,
+  languageCode: string,
+  data: ChapterEditsData,
+  options?: { adminPin?: string; adminEmail?: string | null }
+): Promise<boolean> {
+  const safeSeriesId = sanitizeFirestoreId(seriesId);
+  const safeChapterId = sanitizeFirestoreId(chapterId);
+  const safeLang = ['en', 'ml', 'hi', 'ta'].includes(languageCode) ? languageCode : 'en';
+  const editId = sanitizeFirestoreId(`${safeSeriesId}_${safeChapterId}_${safeLang}`);
+
+  let savedAny = false;
+
+  // 1. Save to server store (/api/chapter-edits -> /tmp/panelverse-library-state-v4.json)
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (options?.adminPin) {
+      headers['x-admin-pin'] = options.adminPin;
+    }
+    const res = await fetch('/api/chapter-edits', {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        seriesId: safeSeriesId,
+        chapterId: safeChapterId,
+        languageCode: safeLang,
+        data,
+        adminEmail: options?.adminEmail || auth.currentUser?.email || undefined,
+      }),
+    });
+    if (res.ok) {
+      savedAny = true;
+    }
+  } catch (err) {
+    console.warn('Server chapter-edits cache save warning:', err);
+  }
+
+  // 2. Upsert to Supabase chapter_edits table
+  try {
+    const supabase = createSupabaseBrowserClient();
+    const { error } = await supabase.from('chapter_edits').upsert(
+      {
+        id: editId,
+        series_id: safeSeriesId,
+        chapter_id: safeChapterId,
+        language_code: safeLang,
+        data,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'id' }
+    );
+    if (!error) {
+      savedAny = true;
+    }
+  } catch {
+    // Fallback to Firestore
+  }
+
+  // 3. Save to Firebase Firestore chapter_edits collection (when signed in as verified admin)
+  try {
+    const fsSaved = await fallbackSaveChapterEdits(
+      safeSeriesId,
+      safeChapterId,
+      safeLang,
+      data
+    );
+    if (fsSaved) {
+      savedAny = true;
+    }
+  } catch (err) {
+    console.warn('Firestore chapter_edits save fallback warning:', err);
+  }
+
+  return savedAny;
+}
+

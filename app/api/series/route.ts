@@ -7,6 +7,21 @@ import { Series } from '@/lib/types';
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
+    const slugOrId = searchParams.get('slug') || searchParams.get('id');
+    if (slugOrId) {
+      const target =
+        dataStore.getSeriesById(slugOrId) || dataStore.getSeriesBySlug(slugOrId);
+      if (!target) {
+        return NextResponse.json({ error: 'Series not found' }, { status: 404 });
+      }
+      const chapters = dataStore.getChaptersBySeriesId(target.id);
+      return NextResponse.json({
+        ...target,
+        chaptersCount: chapters.length,
+        chapters,
+      });
+    }
+
     const q = searchParams.get('q') || undefined;
     const type = searchParams.get('type') || undefined;
     const genre = searchParams.get('genre') || undefined;

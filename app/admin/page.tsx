@@ -302,6 +302,7 @@ export function AdminWorkspace({ initialTab = 'overview' }: { initialTab?: Admin
       }
       setIsAuthenticated(true);
       sessionStorage.setItem('panelverse_admin_auth', 'true');
+      sessionStorage.setItem('panelverse_admin_pin', pinToVerify.trim());
       setPinInput('');
     } catch (err: unknown) {
       const e = err as Error;
@@ -319,6 +320,7 @@ export function AdminWorkspace({ initialTab = 'overview' }: { initialTab?: Admin
   const handleLock = () => {
     setIsAuthenticated(false);
     sessionStorage.removeItem('panelverse_admin_auth');
+    sessionStorage.removeItem('panelverse_admin_pin');
     fetch('/api/admin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1025,6 +1027,14 @@ export function AdminWorkspace({ initialTab = 'overview' }: { initialTab?: Admin
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                <Link
+                  href="/studio"
+                  className="flex items-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-500/15 px-3.5 py-2 text-xs font-bold text-rose-300 shadow-md hover:bg-rose-500/25 hover:text-white transition-all"
+                >
+                  <Sparkles className="h-3.5 w-3.5 text-rose-400" />
+                  <span>Translation &amp; Cut Studio</span>
+                </Link>
+
                 <button
                   type="button"
                   onClick={() => setActiveTab('upload')}

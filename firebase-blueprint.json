@@ -561,6 +561,70 @@
         }
       },
       "required": ["uid", "createdAt"]
+    },
+    "ChapterEdit": {
+      "title": "ChapterEdit",
+      "description": "Pre-translated speech bubble overlays and guided panel cuts created by administrators in PanelVerse Studio.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Composite document identifier {seriesId}_{chapterId}_{languageCode}.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "seriesId": {
+          "type": "string",
+          "description": "Target series identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chapterId": {
+          "type": "string",
+          "description": "Target chapter identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "languageCode": {
+          "type": "string",
+          "description": "ISO language code for the translation (en, ml, hi, ta).",
+          "enum": ["en", "ml", "hi", "ta"],
+          "minLength": 2,
+          "maxLength": 8
+        },
+        "version": {
+          "type": "number",
+          "description": "Schema version number (1)."
+        },
+        "pages": {
+          "type": "array",
+          "description": "Bounded list of page edit maps containing speechBubbles and panelCuts (up to 60 pages).",
+          "maxLength": 60
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the chapter edit record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the chapter edit record was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "seriesId",
+        "chapterId",
+        "languageCode",
+        "version",
+        "pages",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -595,6 +659,10 @@
     "/admins/{adminId}": {
       "schema": "AdminRecord",
       "description": "Trusted administrator role lookup collection."
+    },
+    "/chapter_edits/{editId}": {
+      "schema": "ChapterEdit",
+      "description": "Publicly readable, admin-only writable chapter translation overlays and panel cuts."
     }
   }
 }

@@ -8,10 +8,13 @@ import {
   ChevronLeft,
   ChevronRight,
   ArrowLeftRight,
+  Sparkles,
+  Languages,
 } from 'lucide-react';
 import { CommentsSheet } from './CommentsSheet';
 import { ResilientImage } from './ResilientImage';
-import { Chapter, Series, PageImage } from '@/lib/types';
+import { getChapterEdits } from '@/lib/supabase-sync';
+import { Chapter, Series, PageImage, ChapterEditsData } from '@/lib/types';
 
 interface MangaReaderProps {
   chapter: Chapter & {
@@ -25,7 +28,15 @@ interface MangaReaderProps {
   nextChapterId?: string | null;
   userId?: string;
   username?: string;
+  isAdmin?: boolean;
 }
+
+const EDIT_LANGUAGES = [
+  { code: 'en', label: 'EN' },
+  { code: 'ml', label: 'ML' },
+  { code: 'hi', label: 'HI' },
+  { code: 'ta', label: 'TA' },
+];
 
 export function MangaReader({
   chapter,
@@ -34,11 +45,28 @@ export function MangaReader({
   nextChapterId: nextChapterIdProp,
   userId = 'guest',
   username = 'GuestReader',
+  isAdmin = false,
 }: MangaReaderProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [rtl, setRtl] = useState(true);
   const [hudVisible, setHudVisible] = useState(true);
   const [commentsOpen, setCommentsOpen] = useState(false);
+  const [isPinAdmin, setIsPinAdmin] = useState(false);
+
+  // Pre-saved Studio Chapter Edits state
+  const [editsByLang, setEditsByLang] = useState<Record<string, ChapterEditsData>>({});
+  const [activeEditLang, setActiveEditLang] = useState<string>('en');
+  const [showTranslatedOverlay, setShowTranslatedOverlay] = useState(true);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      if (sessionStorage.getItem('panelverse_admin_auth') === 'true') {
+        Promise.resolve().then(() => setIsPinAdmin(true));
+      }
+    }
+  }, []);
+
+  const canAccessStudio = isAdmin || isPinAdmin;
 
   const series = seriesProp || chapter?.series;
   const seriesId = series?.id || chapter?.seriesId || 'unknown-series';
@@ -60,6 +88,48 @@ export function MangaReader({
   const prevChapterId = prevChapterIdProp ?? chapter?.prevChapterId ?? null;
   const nextChapterId = nextChapterIdProp ?? chapter?.nextChapterId ?? null;
   const totalPages = Math.max(1, pages.length);
+
+  useEffect(() => {
+    let isMounted = true;
+    async function loadSavedEdits() {
+      const found: Record<string, ChapterEditsData> = {};
+      await Promise.all(
+        EDIT_LANGUAGES.map(async ({ code }) => {
+          const data = await getChapterEdits(seriesId, chapter.id, code);
+          if (data && Array.isArray(data.pages) && data.pages.length > 0) {
+            const hasContent = data.pages.some(
+              (p) =>
+                (Array.isArray(p.speechBubbles) && p.speechBubbles.length > 0) ||
+                (Array.isArray(p.panelCuts) && p.panelCuts.length > 0)
+            );
+            if (hasContent) {
+              found[code] = data;
+            }
+          }
+        })
+      );
+      if (!isMounted) return;
+      setEditsByLang(found);
+      const availableCodes = Object.keys(found);
+      if (availableCodes.length > 0 && !found[activeEditLang]) {
+        setActiveEditLang(availableCodes[0]);
+      }
+    }
+    void loadSavedEdits();
+    return () => {
+      isMounted = false;
+    };
+  }, [seriesId, chapter.id, activeEditLang]);
+
+  const activeEdits: ChapterEditsData | null = editsByLang[activeEditLang] || null;
+  const availableLangCodes = useMemo(() => Object.keys(editsByLang), [editsByLang]);
+
+  const hasSpeechBubbles = useMemo(() => {
+    if (!activeEdits) return false;
+    return activeEdits.pages.some(
+      (p) => Array.isArray(p.speechBubbles) && p.speechBubbles.length > 0
+    );
+  }, [activeEdits]);
 
   const goNext = useCallback(() => {
     setCurrentPage((p) => Math.min(totalPages, p + 1));
@@ -118,7 +188,15 @@ export function MangaReader({
     userId,
   ]);
 
-  const activePage = pages[currentPage - 1] || pages[0];
+  const activePageIndex = Math.max(0, currentPage - 1);
+  const activePage = pages[activePageIndex] || pages[0];
+  const activePageEdits = activeEdits?.pages.find(
+    (p) => p.pageIndex === activePageIndex
+  );
+  const activeBubbles =
+    showTranslatedOverlay && activePageEdits?.speechBubbles
+      ? activePageEdits.speechBubbles
+      : [];
 
   const handleZoneClick = (zone: 'left' | 'center' | 'right') => {
     if (zone === 'center') {
@@ -159,6 +237,56 @@ export function MangaReader({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {hasSpeechBubbles && (
+              <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-xs">
+                <button
+                  onClick={() => setShowTranslatedOverlay(false)}
+                  className={`rounded-md px-2 py-1 font-medium transition-colors cursor-pointer ${
+                    !showTranslatedOverlay
+                      ? 'bg-zinc-800 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Original
+                </button>
+                <button
+                  onClick={() => setShowTranslatedOverlay(true)}
+                  className={`flex items-center gap-1 rounded-md px-2 py-1 font-semibold transition-colors cursor-pointer ${
+                    showTranslatedOverlay
+                      ? 'bg-rose-600 text-white'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Languages className="h-3 w-3" />
+                  <span>Translated</span>
+                </button>
+                {availableLangCodes.length > 1 && showTranslatedOverlay && (
+                  <select
+                    value={activeEditLang}
+                    onChange={(e) => setActiveEditLang(e.target.value)}
+                    className="ml-1 bg-transparent pr-1 font-mono text-[11px] font-bold text-rose-300 focus:outline-none"
+                  >
+                    {availableLangCodes.map((code) => (
+                      <option key={code} value={code} className="bg-zinc-900 text-white">
+                        {code.toUpperCase()}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+
+            {canAccessStudio && (
+              <Link
+                href={`/studio?seriesId=${encodeURIComponent(seriesId)}&chapterId=${encodeURIComponent(chapter.id)}`}
+                className="flex h-9 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition-colors"
+                title="Open in Admin Translation & Panel Cut Studio"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-rose-400" />
+                <span className="hidden sm:inline">Studio</span>
+              </Link>
+            )}
+
             <button
               onClick={() => setRtl((prev) => !prev)}
               className="flex h-9 items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 font-mono text-xs font-semibold text-amber-300 hover:bg-amber-500/20 cursor-pointer"
@@ -181,7 +309,10 @@ export function MangaReader({
       {/* Main Paged Stage with 3-Zone Tap Overlay */}
       <div className="relative flex flex-1 items-center justify-center pt-14 pb-20">
         {activePage && (
-          <div className="relative mx-auto max-h-[82vh] max-w-[92vw] md:max-w-[720px] overflow-hidden rounded-lg shadow-2xl border border-zinc-900">
+          <div
+            style={{ containerType: 'inline-size' }}
+            className="relative mx-auto max-h-[82vh] max-w-[92vw] md:max-w-[720px] overflow-hidden rounded-lg shadow-2xl border border-zinc-900"
+          >
             <ResilientImage
               src={activePage.imageUrl}
               alt={activePage.caption || `Page ${activePage.pageNumber}`}
@@ -193,6 +324,29 @@ export function MangaReader({
               pageNumber={activePage.pageNumber}
               priority
             />
+
+            {/* Zero-Lag Pre-Computed Speech Bubble Overlays */}
+            {activeBubbles.map((bubble) => (
+              <div
+                key={bubble.id}
+                style={{
+                  left: `${bubble.box.xPercent}%`,
+                  top: `${bubble.box.yPercent}%`,
+                  width: `${bubble.box.wPercent}%`,
+                  height: `${bubble.box.hPercent}%`,
+                  backgroundColor: bubble.backgroundColor || '#ffffff',
+                  color: bubble.textColor || '#09090b',
+                  fontSize: `clamp(9px, ${(
+                    (bubble.fontSize || 14) * 0.18
+                  ).toFixed(2)}cqw, 26px)`,
+                }}
+                className="pointer-events-none absolute z-20 flex items-center justify-center rounded-md p-1 text-center font-bold leading-tight shadow-sm overflow-hidden break-words"
+              >
+                <span className="w-full break-words">
+                  {bubble.translatedText || bubble.originalText}
+                </span>
+              </div>
+            ))}
 
             {/* 3-Zone Tap Targets */}
             <div className="absolute inset-0 z-10 grid grid-cols-3">

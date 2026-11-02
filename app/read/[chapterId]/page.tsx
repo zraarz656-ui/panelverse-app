@@ -17,7 +17,7 @@ export default function ReaderPage() {
   const params = useParams();
   const chapterId = params?.chapterId as string;
 
-  const { id: userId, username, isAuthReady } = useIdentity();
+  const { id: userId, username, isAuthReady, isAdmin } = useIdentity();
   const [baseChapter, setBaseChapter] = useState<
     (Chapter & { series?: Series; prevChapterId?: string; nextChapterId?: string }) | null
   >(null);
@@ -138,6 +138,7 @@ export default function ReaderPage() {
         chapter={chapter}
         userId={userId || 'guest'}
         username={username || 'GuestReader'}
+        isAdmin={isAdmin}
       />
     );
   }
@@ -147,6 +148,7 @@ export default function ReaderPage() {
       chapter={chapter}
       userId={userId || 'guest'}
       username={username || 'GuestReader'}
+      isAdmin={isAdmin}
     />
   );
 }
