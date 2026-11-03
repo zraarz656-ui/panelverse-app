@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { LanguageProvider } from '@/context/LanguageContext';
+import { ServiceWorkerAndOfflineBanner } from '@/components/OfflineManager';
 
 export const metadata: Metadata = {
   title: 'PanelVerse — Webtoon & Manga Reader',
@@ -27,7 +28,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         suppressHydrationWarning
         className="min-h-screen bg-slate-950 text-slate-100 antialiased selection:bg-rose-500/30 selection:text-rose-200"
       >
-        <LanguageProvider>{children}</LanguageProvider>
+        <LanguageProvider>
+          {children}
+          <ServiceWorkerAndOfflineBanner />
+        </LanguageProvider>
       </body>
     </html>
   );

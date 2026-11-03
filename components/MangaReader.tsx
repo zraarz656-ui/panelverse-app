@@ -12,8 +12,10 @@ import {
   Languages,
 } from 'lucide-react';
 import { CommentsSheet } from './CommentsSheet';
-import { ResilientImage } from './ResilientImage';
+import { TranslatedPanelImage } from './TranslatedPanelImage';
+import { OfflineSaveButton } from './OfflineManager';
 import { getChapterEdits } from '@/lib/supabase-sync';
+import { getOfflineChapter } from '@/lib/offline-cache';
 import { Chapter, Series, PageImage, ChapterEditsData } from '@/lib/types';
 
 interface MangaReaderProps {
@@ -32,10 +34,10 @@ interface MangaReaderProps {
 }
 
 const EDIT_LANGUAGES = [
-  { code: 'en', label: 'EN' },
-  { code: 'ml', label: 'ML' },
-  { code: 'hi', label: 'HI' },
-  { code: 'ta', label: 'TA' },
+  { code: 'en', label: 'English' },
+  { code: 'ml', label: 'Malayalam (മലയാളം)' },
+  { code: 'hi', label: 'Hindi (हिन्दी)' },
+  { code: 'ta', label: 'Tamil (தமிழ்)' },
 ];
 
 export function MangaReader({
@@ -99,6 +101,7 @@ export function MangaReader({
           if (data && Array.isArray(data.pages) && data.pages.length > 0) {
             const hasContent = data.pages.some(
               (p) =>
+                Boolean(p.bakedImageUrl) ||
                 (Array.isArray(p.speechBubbles) && p.speechBubbles.length > 0) ||
                 (Array.isArray(p.panelCuts) && p.panelCuts.length > 0)
             );
@@ -108,6 +111,12 @@ export function MangaReader({
           }
         })
       );
+      if (Object.keys(found).length === 0) {
+        const offlineRecord = await getOfflineChapter(chapter.id);
+        if (offlineRecord?.editsByLang) {
+          Object.assign(found, offlineRecord.editsByLang);
+        }
+      }
       if (!isMounted) return;
       setEditsByLang(found);
       const availableCodes = Object.keys(found);
@@ -125,11 +134,8 @@ export function MangaReader({
   const availableLangCodes = useMemo(() => Object.keys(editsByLang), [editsByLang]);
 
   const hasSpeechBubbles = useMemo(() => {
-    if (!activeEdits) return false;
-    return activeEdits.pages.some(
-      (p) => Array.isArray(p.speechBubbles) && p.speechBubbles.length > 0
-    );
-  }, [activeEdits]);
+    return availableLangCodes.length > 0;
+  }, [availableLangCodes]);
 
   const goNext = useCallback(() => {
     setCurrentPage((p) => Math.min(totalPages, p + 1));
@@ -193,8 +199,12 @@ export function MangaReader({
   const activePageEdits = activeEdits?.pages.find(
     (p) => p.pageIndex === activePageIndex
   );
+  const activeBakedUrl =
+    showTranslatedOverlay && activePageEdits?.bakedImageUrl
+      ? activePageEdits.bakedImageUrl
+      : null;
   const activeBubbles =
-    showTranslatedOverlay && activePageEdits?.speechBubbles
+    showTranslatedOverlay && !activeBakedUrl && activePageEdits?.speechBubbles
       ? activePageEdits.speechBubbles
       : [];
 
@@ -220,87 +230,95 @@ export function MangaReader({
           hudVisible ? 'translate-y-0' : '-translate-y-full'
         }`}
       >
-        <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4 gap-3">
-          <div className="flex items-center gap-3 min-w-0">
+        <div className="mx-auto flex h-13 sm:h-14 max-w-5xl items-center justify-between px-2.5 sm:px-4 gap-1.5 sm:gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
             <Link
               href={`/series/${seriesSlug}`}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white"
+              className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white"
             >
               <ArrowLeft className="h-4 w-4" />
             </Link>
-            <div className="min-w-0">
-              <p className="truncate text-xs text-slate-400">{seriesTitle}</p>
-              <h1 className="truncate text-sm font-bold text-white">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[11px] sm:text-xs text-slate-400 leading-tight">
+                {seriesTitle}
+              </p>
+              <h1 className="truncate text-xs sm:text-sm font-bold text-white leading-tight">
                 {displayHeading}
               </h1>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {hasSpeechBubbles && (
-              <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-xs">
-                <button
-                  onClick={() => setShowTranslatedOverlay(false)}
-                  className={`rounded-md px-2 py-1 font-medium transition-colors cursor-pointer ${
-                    !showTranslatedOverlay
-                      ? 'bg-zinc-800 text-white'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            {/* Language Switcher for Ordinary Users */}
+            <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-1.5 sm:px-2.5 h-8 sm:h-9 text-xs">
+              <Languages className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+              <select
+                value={showTranslatedOverlay && hasSpeechBubbles ? activeEditLang : 'original'}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'original') {
+                    setShowTranslatedOverlay(false);
+                  } else {
+                    setActiveEditLang(val);
+                    setShowTranslatedOverlay(true);
+                  }
+                }}
+                aria-label="Select Reading Language"
+                className="w-[74px] sm:w-auto max-w-[82px] sm:max-w-[150px] truncate bg-transparent text-[11px] sm:text-xs font-semibold text-white focus:outline-none cursor-pointer"
+              >
+                <option value="original" className="bg-zinc-900 text-white">
                   Original
-                </button>
-                <button
-                  onClick={() => setShowTranslatedOverlay(true)}
-                  className={`flex items-center gap-1 rounded-md px-2 py-1 font-semibold transition-colors cursor-pointer ${
-                    showTranslatedOverlay
-                      ? 'bg-rose-600 text-white'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Languages className="h-3 w-3" />
-                  <span>Translated</span>
-                </button>
-                {availableLangCodes.length > 1 && showTranslatedOverlay && (
-                  <select
-                    value={activeEditLang}
-                    onChange={(e) => setActiveEditLang(e.target.value)}
-                    className="ml-1 bg-transparent pr-1 font-mono text-[11px] font-bold text-rose-300 focus:outline-none"
-                  >
-                    {availableLangCodes.map((code) => (
-                      <option key={code} value={code} className="bg-zinc-900 text-white">
-                        {code.toUpperCase()}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            )}
+                </option>
+                {EDIT_LANGUAGES.map((lang) => {
+                  const isReady = Boolean(editsByLang[lang.code]);
+                  return (
+                    <option
+                      key={lang.code}
+                      value={lang.code}
+                      disabled={!isReady}
+                      className="bg-zinc-900 text-white"
+                    >
+                      {lang.label} {isReady ? '✓' : '—'}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            {/* Automatic 5-Chapter LRU Cache + Manual Save Offline Button */}
+            <OfflineSaveButton
+              chapter={chapter}
+              series={series}
+              editsByLang={editsByLang}
+              autoCacheOnMount
+            />
 
             {canAccessStudio && (
               <Link
                 href={`/studio?seriesId=${encodeURIComponent(seriesId)}&chapterId=${encodeURIComponent(chapter.id)}`}
-                className="flex h-9 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition-colors"
-                title="Open in Admin Translation & Panel Cut Studio"
+                className="flex h-8 sm:h-9 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2 sm:px-2.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition-colors shrink-0"
+                title="Open in Admin Translation Studio"
               >
                 <Sparkles className="h-3.5 w-3.5 text-rose-400" />
-                <span className="hidden sm:inline">Studio</span>
+                <span className="hidden md:inline">Studio</span>
               </Link>
             )}
 
             <button
               onClick={() => setRtl((prev) => !prev)}
-              className="flex h-9 items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 font-mono text-xs font-semibold text-amber-300 hover:bg-amber-500/20 cursor-pointer"
+              className="flex h-8 sm:h-9 items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 sm:px-3 font-mono text-[11px] sm:text-xs font-semibold text-amber-300 hover:bg-amber-500/20 cursor-pointer shrink-0"
               title="Toggle Reading Direction"
             >
               <ArrowLeftRight className="h-3.5 w-3.5" />
-              <span>{rtl ? 'RTL (JP)' : 'LTR'}</span>
+              <span>{rtl ? 'RTL' : 'LTR'}</span>
             </button>
             <button
               onClick={() => setCommentsOpen(true)}
-              className="flex h-9 items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 text-xs font-medium text-slate-200 hover:border-zinc-700 cursor-pointer"
+              className="flex h-8 sm:h-9 items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2 sm:px-3 text-xs font-medium text-slate-200 hover:border-zinc-700 cursor-pointer shrink-0"
+              title="Comments"
             >
               <MessageSquare className="h-3.5 w-3.5 text-rose-500" />
-              <span className="hidden sm:inline">Comments</span>
+              <span className="hidden md:inline">Comments</span>
             </button>
           </div>
         </div>
@@ -309,11 +327,8 @@ export function MangaReader({
       {/* Main Paged Stage with 3-Zone Tap Overlay */}
       <div className="relative flex flex-1 items-center justify-center pt-14 pb-20">
         {activePage && (
-          <div
-            style={{ containerType: 'inline-size' }}
-            className="relative mx-auto max-h-[82vh] max-w-[92vw] md:max-w-[720px] overflow-hidden rounded-lg shadow-2xl border border-zinc-900"
-          >
-            <ResilientImage
+          <div className="relative mx-auto max-h-[82vh] max-w-[92vw] md:max-w-[720px] overflow-hidden rounded-lg shadow-2xl border border-zinc-900">
+            <TranslatedPanelImage
               src={activePage.imageUrl}
               alt={activePage.caption || `Page ${activePage.pageNumber}`}
               className="max-h-[82vh] w-auto object-contain mx-auto"
@@ -323,30 +338,11 @@ export function MangaReader({
               chapterNumber={chapterNumber}
               pageNumber={activePage.pageNumber}
               priority
+              bubbles={activeBubbles}
+              languageCode={activeEditLang}
+              showTranslated={showTranslatedOverlay}
+              preBakedUrl={activeBakedUrl}
             />
-
-            {/* Zero-Lag Pre-Computed Speech Bubble Overlays */}
-            {activeBubbles.map((bubble) => (
-              <div
-                key={bubble.id}
-                style={{
-                  left: `${bubble.box.xPercent}%`,
-                  top: `${bubble.box.yPercent}%`,
-                  width: `${bubble.box.wPercent}%`,
-                  height: `${bubble.box.hPercent}%`,
-                  backgroundColor: bubble.backgroundColor || '#ffffff',
-                  color: bubble.textColor || '#09090b',
-                  fontSize: `clamp(9px, ${(
-                    (bubble.fontSize || 14) * 0.18
-                  ).toFixed(2)}cqw, 26px)`,
-                }}
-                className="pointer-events-none absolute z-20 flex items-center justify-center rounded-md p-1 text-center font-bold leading-tight shadow-sm overflow-hidden break-words"
-              >
-                <span className="w-full break-words">
-                  {bubble.translatedText || bubble.originalText}
-                </span>
-              </div>
-            ))}
 
             {/* 3-Zone Tap Targets */}
             <div className="absolute inset-0 z-10 grid grid-cols-3">

@@ -142,6 +142,7 @@ export interface PageEditData {
   pageIndex: number;
   speechBubbles: SpeechBubbleOverlay[];
   panelCuts: PanelCutBox[];
+  bakedImageUrl?: string;
 }
 
 export interface ChapterEditsData {

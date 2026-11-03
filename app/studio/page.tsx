@@ -16,12 +16,16 @@ import {
   Layers,
   Languages,
   RotateCcw,
+  Cpu,
+  Sliders,
+  X,
+  HelpCircle,
+  Check,
 } from 'lucide-react';
 import { useIdentity } from '@/hooks/useIdentity';
 import {
   getChapterEdits,
   saveChapterEdits,
-  saveChapterToFirestore,
   subscribeLibrarySeriesFromFirestore,
   subscribeLibraryChaptersFromFirestore,
   mergeSeriesWithFirestore,
@@ -46,258 +50,12 @@ const STUDIO_LANGUAGES = [
   { code: 'ta', label: 'Tamil (தமிழ்)' },
 ];
 
-function ensureProxiedSrc(src: string): string {
-  if (!src) return '';
-  if (
-    src.startsWith('data:') ||
-    src.startsWith('/') ||
-    src.includes('/api/image-proxy')
-  ) {
-    return src;
-  }
-  return `/api/image-proxy?url=${encodeURIComponent(src)}`;
-}
-
-/**
- * Samples the dominant interior background color of a speech bubble around the text box
- * so erasing the original foreign text blends seamlessly into the original bubble.
- */
-function sampleBubbleColors(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  canvasW: number,
-  canvasH: number
-): { bgHex: string; textHex: string } {
-  const sx = Math.max(0, Math.floor(x));
-  const sy = Math.max(0, Math.floor(y));
-  const sw = Math.max(4, Math.min(canvasW - sx, Math.ceil(w)));
-  const sh = Math.max(4, Math.min(canvasH - sy, Math.ceil(h)));
-
-  try {
-    const imgData = ctx.getImageData(sx, sy, sw, sh).data;
-    let lightCount = 0;
-    let darkCount = 0;
-    let rLight = 0,
-      gLight = 0,
-      bLight = 0;
-    let rDark = 0,
-      gDark = 0,
-      bDark = 0;
-
-    // Sample perimeter + grid points inside the text box
-    const step = Math.max(4, Math.floor((sw * sh) / 250) * 4);
-    for (let i = 0; i < imgData.length; i += step) {
-      const r = imgData[i];
-      const g = imgData[i + 1];
-      const b = imgData[i + 2];
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-      if (lum >= 145) {
-        lightCount++;
-        rLight += r;
-        gLight += g;
-        bLight += b;
-      } else if (lum <= 95) {
-        darkCount++;
-        rDark += r;
-        gDark += g;
-        bDark += b;
-      }
-    }
-
-    const toHex = (n: number) =>
-      Math.max(0, Math.min(255, Math.round(n)))
-        .toString(16)
-        .padStart(2, '0');
-
-    // If predominantly dark bubble (e.g. Solo Leveling system window or dark narration)
-    if (darkCount > lightCount * 1.35 && darkCount > 0) {
-      const rAvg = rDark / darkCount;
-      const gAvg = gDark / darkCount;
-      const bAvg = bDark / darkCount;
-      return {
-        bgHex: `#${toHex(rAvg)}${toHex(gAvg)}${toHex(bAvg)}`,
-        textHex: '#ffffff',
-      };
-    }
-
-    if (lightCount > 0) {
-      const rAvg = rLight / lightCount;
-      const gAvg = gLight / lightCount;
-      const bAvg = bLight / lightCount;
-      // Snap near-white comic bubbles to crisp white
-      if (rAvg > 235 && gAvg > 235 && bAvg > 235) {
-        return { bgHex: '#ffffff', textHex: '#09090b' };
-      }
-      return {
-        bgHex: `#${toHex(rAvg)}${toHex(gAvg)}${toHex(bAvg)}`,
-        textHex: '#09090b',
-      };
-    }
-  } catch {
-    // Fallback if getImageData fails
-  }
-
-  return { bgHex: '#ffffff', textHex: '#09090b' };
-}
-
-/**
- * Word-wraps text to fit inside maxWidth on the given Canvas 2D context.
- */
-function wrapCanvasText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number
-): string[] {
-  const paragraphs = text.split(/\n+/);
-  const lines: string[] = [];
-
-  for (const para of paragraphs) {
-    const words = para.trim().split(/\s+/).filter(Boolean);
-    if (words.length === 0) continue;
-    let currentLine = words[0];
-
-    for (let i = 1; i < words.length; i++) {
-      const word = words[i];
-      const testLine = `${currentLine} ${word}`;
-      if (ctx.measureText(testLine).width <= maxWidth) {
-        currentLine = testLine;
-      } else {
-        lines.push(currentLine);
-        currentLine = word;
-      }
-    }
-    lines.push(currentLine);
-  }
-
-  return lines.length > 0 ? lines : [text];
-}
-
-/**
- * Renders the original page image + clean, borderless inpainted speech bubbles
- * in authentic comic typography directly onto a canvas and returns a data URL.
- */
-function renderCleanTranslatedPageToDataUrl(
-  imgEl: HTMLImageElement,
-  bubbles: SpeechBubbleOverlay[],
-  languageCode: string
-): string {
-  const w = imgEl.naturalWidth || imgEl.width || 800;
-  const h = imgEl.naturalHeight || imgEl.height || 1200;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return imgEl.src;
-
-  // 1. Draw the pristine original comic page
-  ctx.drawImage(imgEl, 0, 0, w, h);
-
-  if (!bubbles || bubbles.length === 0) {
-    return canvas.toDataURL('image/webp', 0.92);
-  }
-
-  const isEnglish = languageCode === 'en';
-  const fontFamily = isEnglish
-    ? '"Comic Sans MS", "Chalkboard SE", "Bangers", system-ui, sans-serif'
-    : '"Noto Sans Malayalam", "Manjari", system-ui, sans-serif';
-
-  for (const bubble of bubbles) {
-    const rawText = (bubble.translatedText || '').trim();
-    if (!rawText || rawText === 'Translating...') continue;
-
-    // Convert 0..100 percentages to pixel coordinates
-    const bx = (bubble.box.xPercent / 100) * w;
-    const by = (bubble.box.yPercent / 100) * h;
-    const bw = Math.max(24, (bubble.box.wPercent / 100) * w);
-    const bh = Math.max(20, (bubble.box.hPercent / 100) * h);
-
-    const bgFill = bubble.backgroundColor || '#ffffff';
-    const textFill = bubble.textColor || '#09090b';
-
-    // 2. Softly erase ONLY the original foreign letters inside the bubble
-    // using a feathered capsule/ellipse mask so the bubble's black outline is never touched
-    ctx.save();
-    const padX = Math.min(bw * 0.08, 10);
-    const padY = Math.min(bh * 0.08, 10);
-    const rx = bx - padX * 0.5;
-    const ry = by - padY * 0.5;
-    const rw = bw + padX;
-    const rh = bh + padY;
-    const radius = Math.min(rw, rh) * 0.35;
-
-    ctx.filter = 'blur(4px)';
-    ctx.fillStyle = bgFill;
-    ctx.beginPath();
-    ctx.roundRect(rx, ry, rw, rh, radius);
-    ctx.fill();
-    ctx.filter = 'none';
-
-    // Solid inner core fill to ensure 100% of old text strokes are covered
-    ctx.beginPath();
-    ctx.roundRect(bx, by, bw, bh, Math.min(bw, bh) * 0.28);
-    ctx.fill();
-    ctx.restore();
-
-    // 3. Auto-fit and render comic-styled translated text centered inside the bubble
-    const displayText = isEnglish ? rawText.toUpperCase() : rawText;
-    const userScale = (bubble.fontSize || 14) / 14;
-
-    const maxTextWidth = bw * 0.92;
-    const maxTextHeight = bh * 0.92;
-
-    let bestFontSize = Math.max(11, Math.min(Math.round(w * 0.022), 34));
-    let wrappedLines: string[] = [displayText];
-
-    // Find the largest comfortable font size that fits inside the original text bounds
-    for (let testSize = Math.min(38, Math.round(bh * 0.55)); testSize >= 10; testSize -= 1) {
-      ctx.font = `800 ${testSize}px ${fontFamily}`;
-      const candidateLines = wrapCanvasText(ctx, displayText, maxTextWidth);
-      const lineHeight = testSize * 1.18;
-      const totalH = candidateLines.length * lineHeight;
-      const widestLine = Math.max(
-        ...candidateLines.map((l) => ctx.measureText(l).width)
-      );
-      if (totalH <= maxTextHeight && widestLine <= maxTextWidth) {
-        bestFontSize = testSize;
-        wrappedLines = candidateLines;
-        break;
-      }
-      wrappedLines = candidateLines;
-      bestFontSize = testSize;
-    }
-
-    const finalFontSize = Math.max(9, Math.round(bestFontSize * userScale));
-    ctx.save();
-    ctx.font = `800 ${finalFontSize}px ${fontFamily}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
-    wrappedLines = wrapCanvasText(ctx, displayText, maxTextWidth);
-    const lineHeight = finalFontSize * 1.18;
-    const totalBlockHeight = wrappedLines.length * lineHeight;
-    const centerX = bx + bw / 2;
-    const startY = by + bh / 2 - totalBlockHeight / 2 + lineHeight / 2;
-
-    // Subtle halo in bubble background color so text stays ultra-crisp
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = Math.max(3, Math.round(finalFontSize * 0.22));
-    ctx.strokeStyle = bgFill;
-    ctx.fillStyle = textFill;
-
-    wrappedLines.forEach((line, idx) => {
-      const ly = startY + idx * lineHeight;
-      ctx.strokeText(line, centerX, ly);
-      ctx.fillText(line, centerX, ly);
-    });
-    ctx.restore();
-  }
-
-  return canvas.toDataURL('image/webp', 0.92);
-}
+import {
+  ensureProxiedSrc,
+  sampleBubbleColors,
+  renderCleanTranslatedPageToDataUrl,
+  createHighContrastTextOnlyCanvasDataUrl,
+} from '@/lib/canvas-bubble-renderer';
 
 function StudioContent() {
   const searchParams = useSearchParams();
@@ -370,6 +128,49 @@ function StudioContent() {
     type: 'success' | 'error' | 'info';
     text: string;
   } | null>(null);
+
+  // AI Translation Engine & OpenRouter API key state
+  const [selectedEngine, setSelectedEngine] = useState<
+    'auto' | 'gemini' | 'openrouter'
+  >('auto');
+  const [openRouterApiKey, setOpenRouterApiKey] = useState('');
+  const [tempApiKeyInput, setTempApiKeyInput] = useState('');
+  const [showEngineModal, setShowEngineModal] = useState(false);
+  const [engineKeySavedNotice, setEngineKeySavedNotice] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const storedKey =
+        localStorage.getItem('panelverse_openrouter_key') || '';
+      const storedEngine =
+        (localStorage.getItem('panelverse_ocr_engine') as
+          | 'auto'
+          | 'gemini'
+          | 'openrouter') || 'auto';
+      setOpenRouterApiKey(storedKey);
+      setTempApiKeyInput(storedKey);
+      setSelectedEngine(storedEngine);
+    }
+  }, []);
+
+  const handleSaveEngineSettings = (
+    engine: 'auto' | 'gemini' | 'openrouter',
+    key: string
+  ) => {
+    setSelectedEngine(engine);
+    setOpenRouterApiKey(key.trim());
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('panelverse_ocr_engine', engine);
+      if (key.trim()) {
+        localStorage.setItem('panelverse_openrouter_key', key.trim());
+      } else {
+        localStorage.removeItem('panelverse_openrouter_key');
+      }
+    }
+    setEngineKeySavedNotice(true);
+    setTimeout(() => setEngineKeySavedNotice(false), 3000);
+    setShowEngineModal(false);
+  };
 
   const originalImageRefs = useRef<Record<number, HTMLImageElement | null>>({});
   const idCounterRef = useRef<number>(1);
@@ -645,8 +446,8 @@ function StudioContent() {
       if (!fullCtx) throw new Error('Canvas 2D context unavailable');
       fullCtx.drawImage(imgEl, 0, 0, natW, natH);
 
-      // Slice tall webtoon strips into ~1800px vertical segments so Gemini detects small text accurately
-      const maxSliceHeight = Math.round(natW * 2.2);
+      // Use 5.5x width per slice so virtually all webtoon pages scan in 1 single high-accuracy API call (minimizing rate limit pressure)
+      const maxSliceHeight = Math.round(natW * 5.5);
       const numSlices = Math.max(1, Math.ceil(natH / maxSliceHeight));
       const detectedOverlays: SpeechBubbleOverlay[] = [];
 
@@ -656,13 +457,58 @@ function StudioContent() {
         'x-admin-pin': savedPin || '1234',
       };
 
+      const callOcrEndpoint = async (imageBase64: string) => {
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const res = await fetch('/api/ocr-translate', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              mode: 'full-page',
+              imageBase64,
+              mimeType: 'image/jpeg',
+              targetLanguage: languageCode,
+              adminEmail: email,
+              engine: selectedEngine,
+              openRouterKey: openRouterApiKey || undefined,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok) return data;
+
+          const isRateLimit =
+            res.status === 429 ||
+            res.status === 503 ||
+            data.isRateLimit ||
+            (typeof data.error === 'string' &&
+              (data.error.includes('demand') ||
+                data.error.includes('15 RPM') ||
+                data.error.includes('limit') ||
+                data.error.includes('Cooling')));
+
+          if (isRateLimit && attempt < 3) {
+            const waitSec = data.retryAfterSeconds || (20 + attempt * 6);
+            for (let s = waitSec; s > 0; s--) {
+              setStatusMessage({
+                type: 'info',
+                text: `Free tier rate limit reached (15 RPM limit). Pausing for ${s}s to cool down before resuming Page ${pageIdx + 1} automatically...`,
+              });
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+            continue;
+          }
+
+          throw new Error(data.error || 'Auto-translation failed');
+        }
+        return { bubbles: [] };
+      };
+
       for (let s = 0; s < numSlices; s++) {
         const sliceY = s * maxSliceHeight;
         const sliceH = Math.min(maxSliceHeight, natH - sliceY);
         if (sliceH <= 20) continue;
 
-        // Downscale slice to max 1200px width for fast, low-latency Gemini Vision inference
-        const scale = Math.min(1, 1200 / natW);
+        // Downscale slice to max 1100px width for fast, low-latency Gemini Vision inference
+        const scale = Math.min(1, 1100 / natW);
         const sendW = Math.max(1, Math.round(natW * scale));
         const sendH = Math.max(1, Math.round(sliceH * scale));
 
@@ -683,23 +529,21 @@ function StudioContent() {
           sendW,
           sendH
         );
-        const sliceBase64 = sliceCanvas.toDataURL('image/jpeg', 0.86);
+        const sliceBase64 = sliceCanvas.toDataURL('image/jpeg', 0.85);
 
-        const res = await fetch('/api/ocr-translate', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            mode: 'full-page',
-            imageBase64: sliceBase64,
-            mimeType: 'image/jpeg',
-            targetLanguage: languageCode,
-            adminEmail: email,
-          }),
-        });
+        let result = await callOcrEndpoint(sliceBase64);
 
-        const result = await res.json();
-        if (!res.ok) {
-          throw new Error(result.error || 'Auto-translation failed');
+        // If mature artwork triggered Gemini's image safety filter despite BLOCK_NONE,
+        // automatically retry using a high-contrast B&W text-isolated canvas (bleaches skin tones/art while keeping bubble text crisp)
+        if (
+          result.blockedBySafety ||
+          (!Array.isArray(result.bubbles) || result.bubbles.length === 0)
+        ) {
+          if (result.blockedBySafety) {
+            const bwTextOnlyBase64 =
+              createHighContrastTextOnlyCanvasDataUrl(sliceCanvas);
+            result = await callOcrEndpoint(bwTextOnlyBase64);
+          }
         }
 
         const rawBubbles: Array<{
@@ -754,7 +598,7 @@ function StudioContent() {
 
       return detectedOverlays;
     },
-    [languageCode, savedPin, email]
+    [languageCode, savedPin, email, selectedEngine, openRouterApiKey]
   );
 
   // Trigger 1-Click Auto-Translate for a single page
@@ -835,6 +679,11 @@ function StudioContent() {
         };
         setEditsData(partialEdits);
         refreshBakedPagePreview(idx, partialEdits);
+
+        // 2.2s gentle pacing delay between pages so multi-page episodes comfortably stay under free-tier 15 RPM limits
+        if (idx < originalPages.length - 1) {
+          await new Promise((r) => setTimeout(r, 2200));
+        }
       }
 
       setStatusMessage({
@@ -916,95 +765,33 @@ function StudioContent() {
     if (selectedBubbleId === bubbleId) setSelectedBubbleId(null);
   };
 
-  // Bake translated pages into clean WebP images and publish directly to the Reader
+  // Publish translated bubbles for the selected language to the Reader (Server + Supabase + Firestore)
   const handleSaveToReader = async () => {
     if (!selectedSeriesId || !selectedChapterId || !activeChapter) return;
     setIsSaving(true);
+    const langLabel =
+      STUDIO_LANGUAGES.find((l) => l.code === languageCode)?.label ||
+      languageCode.toUpperCase();
     setStatusMessage({
       type: 'info',
-      text: 'Baking translated bubbles into episode pages & publishing to Reader...',
+      text: `Publishing ${langLabel} translation for Episode ${activeChapter.chapterNumber} to Reader...`,
     });
 
     try {
-      const finalPages: PageImage[] = [];
-
-      for (let idx = 0; idx < originalPages.length; idx++) {
-        const origPage = originalPages[idx];
-        const pageEdit = editsData.pages.find((p) => p.pageIndex === idx);
-        const bubbles = pageEdit?.speechBubbles || [];
-        const imgEl = originalImageRefs.current[idx];
-
-        if (bubbles.length > 0 && imgEl && imgEl.naturalWidth > 0) {
-          const bakedDataUrl = renderCleanTranslatedPageToDataUrl(
-            imgEl,
-            bubbles,
-            languageCode
-          );
-          // Upload baked WebP to server processor so payload stays compact & fast
-          const blob = await (await fetch(bakedDataUrl)).blob();
-          const file = new File([blob], `page-${idx + 1}.webp`, {
-            type: 'image/webp',
-          });
-          const uploadedUrl = await compressImageFileToDataUrl(file, {
-            maxWidth: 1400,
-            maxHeight: 8000,
-          });
-          finalPages.push({
-            ...origPage,
-            pageNumber: idx + 1,
-            imageUrl: uploadedUrl,
-          });
-        } else {
-          finalPages.push({
-            ...origPage,
-            pageNumber: idx + 1,
-          });
-        }
-      }
-
       const resolvedSeriesId =
         activeChapter.seriesId || selectedSeriesId || 'series-solo-leveling';
 
-      const updatedChapterObj: Chapter = {
-        ...activeChapter,
-        seriesId: resolvedSeriesId,
-        pages: finalPages,
-        pagesCount: finalPages.length,
-        hasCustomPages: true,
-        isCustomEdited: true,
-      };
-
-      // 1. Save baked pages to server store (/api/admin edit_chapter)
-      await fetch('/api/admin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'edit_chapter',
-          chapterId: updatedChapterObj.id,
-          seriesId: resolvedSeriesId,
-          chapterNumber: updatedChapterObj.chapterNumber,
-          title: updatedChapterObj.title,
-          releaseDate: updatedChapterObj.releaseDate,
-          customPages: finalPages,
-          panelUrls: finalPages.map((p) => p.imageUrl),
-        }),
-      });
-
-      // 2. Save baked pages to Supabase & Firebase Firestore
-      await saveChapterToFirestore(updatedChapterObj, false);
-
-      // 3. Clear rectangular HTML overlay records so Reader displays the clean baked pages directly
       await saveChapterEdits(
         resolvedSeriesId,
         selectedChapterId,
         languageCode,
-        { version: 1, pages: [] },
+        editsData,
         { adminPin: savedPin, adminEmail: email }
       );
 
       setStatusMessage({
         type: 'success',
-        text: `Published cleanly translated Episode ${updatedChapterObj.chapterNumber} to Reader!`,
+        text: `Saved ${langLabel} translation for Episode ${activeChapter.chapterNumber}! Users can now select ${langLabel} in the Reader.`,
       });
     } catch (err: unknown) {
       setStatusMessage({
@@ -1173,6 +960,42 @@ function StudioContent() {
                 ))}
               </select>
             </div>
+
+            {/* AI Engine & OpenRouter button */}
+            <button
+              type="button"
+              onClick={() => {
+                setTempApiKeyInput(openRouterApiKey);
+                setShowEngineModal(true);
+              }}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 h-9 text-xs font-semibold transition-all cursor-pointer ${
+                selectedEngine === 'openrouter' || openRouterApiKey
+                  ? 'border-indigo-500/50 bg-indigo-950/40 text-indigo-300 hover:bg-indigo-900/60'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-white'
+              }`}
+              title="Configure AI Translation Engine & OpenRouter API key"
+            >
+              <Cpu className="h-3.5 w-3.5 text-indigo-400" />
+              <span className="hidden sm:inline">Engine:</span>
+              <span className="capitalize">
+                {selectedEngine === 'openrouter'
+                  ? 'OpenRouter'
+                  : selectedEngine === 'gemini'
+                  ? 'Gemini'
+                  : 'Auto AI'}
+              </span>
+              {openRouterApiKey ? (
+                <span
+                  className="h-2 w-2 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/50"
+                  title="OpenRouter key is active"
+                />
+              ) : (
+                <span
+                  className="h-1.5 w-1.5 rounded-full bg-zinc-600"
+                  title="OpenRouter key optional"
+                />
+              )}
+            </button>
 
             <button
               onClick={handleAutoTranslateEpisode}
@@ -1511,6 +1334,197 @@ function StudioContent() {
           </div>
         </div>
       </div>
+
+      {/* AI Translation Engine & OpenRouter Setup Modal */}
+      {showEngineModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
+                  <Cpu className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    AI Translation Engine & OpenRouter
+                  </h3>
+                  <p className="text-[11px] text-zinc-400">
+                    Bypass Google 15 RPM rate limits using free vision models
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowEngineModal(false)}
+                className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-900 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Engine Selection */}
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-zinc-300">
+                Choose Translation Engine:
+              </label>
+              <div className="grid gap-2">
+                {[
+                  {
+                    id: 'auto' as const,
+                    title: 'Auto (Gemini + OpenRouter Fallback)',
+                    tag: 'Recommended',
+                    desc: 'Uses Gemini by default. If rate limit (15 RPM) is reached, seamlessly switches to OpenRouter without pauses.',
+                  },
+                  {
+                    id: 'openrouter' as const,
+                    title: 'OpenRouter Direct (Unlimited Free Models)',
+                    tag: 'Fastest for full chapters',
+                    desc: 'Bypasses Gemini completely. Uses free vision models (Gemini Flash Exp, Qwen 2.5-VL 72B, Llama 3.2 11B Vision).',
+                  },
+                  {
+                    id: 'gemini' as const,
+                    title: 'Gemini Direct (Standard)',
+                    tag: '15 RPM free tier limit',
+                    desc: 'Direct calls to Google Gemini. Features built-in automatic cooldown countdown if throttled.',
+                  },
+                ].map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setSelectedEngine(item.id)}
+                    className={`flex flex-col text-left rounded-xl border p-3 transition-all cursor-pointer ${
+                      selectedEngine === item.id
+                        ? 'border-indigo-500 bg-indigo-950/30 shadow-md shadow-indigo-500/10'
+                        : 'border-zinc-800 bg-zinc-900/50 hover:border-zinc-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-white flex items-center gap-2">
+                        {item.title}
+                      </span>
+                      <span className="rounded bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 text-[9px] font-medium text-indigo-300">
+                        {item.tag}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[11px] text-zinc-400 leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* OpenRouter API Key Input */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
+                  <KeyRound className="h-3.5 w-3.5 text-indigo-400" />
+                  <span>OpenRouter API Key:</span>
+                </label>
+                {openRouterApiKey ? (
+                  <span className="flex items-center gap-1 text-[10px] text-emerald-400">
+                    <Check className="h-3 w-3" /> Key saved in browser
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-amber-400/90">
+                    Optional (uses free models)
+                  </span>
+                )}
+              </div>
+              <input
+                type="password"
+                value={tempApiKeyInput}
+                onChange={(e) => setTempApiKeyInput(e.target.value)}
+                placeholder="sk-or-v1-xxxxxxxxxxxxxxxx..."
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-white placeholder-zinc-600 focus:border-indigo-500 focus:outline-none font-mono"
+              />
+              <p className="text-[10px] text-zinc-500">
+                Your key is stored securely in your browser&apos;s local storage and sent only to your own proxy endpoint.
+              </p>
+            </div>
+
+            {/* How to get a free OpenRouter key */}
+            <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-3.5 space-y-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                <HelpCircle className="h-3.5 w-3.5 text-rose-400" />
+                <span>How to get your free key (Takes 30 seconds):</span>
+              </div>
+              <ol className="list-decimal list-inside space-y-1 text-[11px] text-zinc-400 leading-relaxed">
+                <li>
+                  Open{' '}
+                  <a
+                    href="https://openrouter.ai"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-indigo-400 underline hover:text-indigo-300 inline-flex items-center gap-0.5"
+                  >
+                    openrouter.ai <ExternalLink className="h-2.5 w-2.5 inline" />
+                  </a>{' '}
+                  and sign in (with Google or email).
+                </li>
+                <li>
+                  Go to{' '}
+                  <a
+                    href="https://openrouter.ai/settings/keys"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-indigo-400 underline hover:text-indigo-300 inline-flex items-center gap-0.5"
+                  >
+                    Keys Settings <ExternalLink className="h-2.5 w-2.5 inline" />
+                  </a>{' '}
+                  and click <strong>&quot;Create Key&quot;</strong>.
+                </li>
+                <li>
+                  Copy the generated key (starts with <code className="text-zinc-300">sk-or-v1-</code>) and paste it in the box above.
+                </li>
+                <li>
+                  Tap <strong>&quot;Save Settings&quot;</strong> below to translate without 15 RPM interruptions!
+                </li>
+              </ol>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800/80">
+              {openRouterApiKey && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSaveEngineSettings(selectedEngine, '');
+                    setTempApiKeyInput('');
+                  }}
+                  className="rounded-xl border border-zinc-800 px-3 py-2 text-xs font-semibold text-rose-400 hover:bg-rose-500/10 transition-colors mr-auto"
+                >
+                  Clear Key
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowEngineModal(false)}
+                className="rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveEngineSettings(selectedEngine, tempApiKeyInput)
+                }
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-500 transition-colors cursor-pointer shadow-lg shadow-indigo-600/20"
+              >
+                Save Settings
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Engine Settings Saved Notification */}
+      {engineKeySavedNotice && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-zinc-950/95 px-4 py-3 text-xs font-semibold text-emerald-400 shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-2">
+          <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+          <span>Translation Engine settings saved successfully!</span>
+        </div>
+      )}
     </div>
   );
 }

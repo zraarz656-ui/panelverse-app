@@ -15,12 +15,20 @@ import {
   Upload,
   LogIn,
   LogOut,
+  Download,
+  Trash2,
 } from 'lucide-react';
 import { TopNavbar } from '@/components/TopNavbar';
 import { BottomNav } from '@/components/BottomNav';
 import { ResilientImage } from '@/components/ResilientImage';
 import { useIdentity } from '@/hooks/useIdentity';
 import { subscribeReadingProgressFromFirestore } from '@/lib/firebase-sync';
+import {
+  getAllOfflineChapters,
+  removeOfflineChapter,
+  clearAllOfflineChapters,
+  OfflineChapterSummary,
+} from '@/lib/offline-cache';
 import { Series, ReadingProgress } from '@/lib/types';
 
 export default function MeProfilePage() {
@@ -40,6 +48,7 @@ export default function MeProfilePage() {
 
   const [bookmarkedSeries, setBookmarkedSeries] = useState<Series[]>([]);
   const [readingHistory, setReadingHistory] = useState<ReadingProgress[]>([]);
+  const [offlineChapters, setOfflineChapters] = useState<OfflineChapterSummary[]>([]);
   const [newGeneratedKey, setNewGeneratedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [isGeneratingKey, setIsGeneratingKey] = useState(false);
@@ -49,6 +58,20 @@ export default function MeProfilePage() {
   const [isRecovering, setIsRecovering] = useState(false);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [recoverySuccess, setRecoverySuccess] = useState(false);
+
+  useEffect(() => {
+    const syncOffline = () => {
+      getAllOfflineChapters()
+        .then(setOfflineChapters)
+        .catch(() => {});
+    };
+    syncOffline();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('panelverse-offline-updated', syncOffline);
+      return () =>
+        window.removeEventListener('panelverse-offline-updated', syncOffline);
+    }
+  }, []);
 
   useEffect(() => {
     async function loadData() {
@@ -269,6 +292,112 @@ export default function MeProfilePage() {
           {recoveryError && (
             <div className="mt-3 flex items-center gap-2 text-xs text-rose-400">
               <AlertCircle className="h-4 w-4" /> {recoveryError}
+            </div>
+          )}
+        </section>
+
+        {/* Offline Saved Chapters Section (Auto-Cached 5-Chapter LRU + Pinned Downloads) */}
+        <section className="mb-10">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-bold text-white">
+                <Download className="h-4 w-4 text-emerald-400" />
+                <span>Offline Ready Chapters ({offlineChapters.length})</span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Your 5 most recently read chapters are automatically cached for offline reading. Pin any chapter in the reader to keep it permanently.
+              </p>
+            </div>
+            {offlineChapters.length > 0 && (
+              <button
+                type="button"
+                onClick={() => void clearAllOfflineChapters()}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-400 hover:border-rose-500/40 hover:text-rose-300 transition-colors cursor-pointer"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Clear Cache</span>
+              </button>
+            )}
+          </div>
+
+          {offlineChapters.length === 0 ? (
+            <div className="rounded-xl border border-slate-800/80 bg-slate-900/20 p-6 text-center text-xs text-slate-500">
+              No chapters cached yet. Open any episode or chapter to automatically cache it for offline reading!
+            </div>
+          ) : (
+            <div className="flex flex-col divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-900/30">
+              {offlineChapters.map((item) => (
+                <div
+                  key={item.chapterId}
+                  className="flex items-center justify-between gap-3 p-4 hover:bg-slate-800/40 transition-colors"
+                >
+                  <Link
+                    href={`/read/${item.chapterId}`}
+                    className="group flex items-center gap-3 flex-1 min-w-0"
+                  >
+                    <div className="relative h-12 w-9 shrink-0 overflow-hidden rounded bg-slate-950">
+                      <ResilientImage
+                        src={item.coverImage}
+                        alt={item.seriesTitle}
+                        fallbackTitle={item.seriesTitle}
+                        fallbackType={item.seriesType}
+                        className="object-cover"
+                      />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="text-xs font-bold text-white group-hover:text-emerald-400 transition-colors truncate">
+                        {item.seriesTitle} —{' '}
+                        {item.seriesType === 'webtoon' ? 'Ep.' : 'Ch.'}{' '}
+                        {item.chapterNumber}
+                      </h4>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                        <span className="truncate max-w-[200px] sm:max-w-xs">
+                          {item.chapterTitle}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono tabular-nums">
+                          {item.pagesCount} pages
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span
+                          className={
+                            item.isPinned
+                              ? 'text-emerald-400 font-semibold'
+                              : 'text-sky-400 font-medium'
+                          }
+                        >
+                          {item.isPinned ? 'Pinned Offline' : 'Auto-Cached (Recent 5)'}
+                        </span>
+                        {item.cachedLanguages.length > 0 && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-mono uppercase text-rose-400">
+                              +{item.cachedLanguages.join(', ')}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </Link>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Link
+                      href={`/read/${item.chapterId}`}
+                      className="rounded-lg bg-emerald-600/20 border border-emerald-500/40 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-600/30 transition-colors"
+                    >
+                      Read
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => void removeOfflineChapter(item.chapterId)}
+                      title="Remove from offline cache"
+                      className="p-1.5 text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </section>

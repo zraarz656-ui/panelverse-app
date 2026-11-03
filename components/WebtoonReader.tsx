@@ -16,7 +16,10 @@ import {
 } from 'lucide-react';
 import { CommentsSheet } from './CommentsSheet';
 import { ResilientImage } from './ResilientImage';
+import { TranslatedPanelImage } from './TranslatedPanelImage';
+import { OfflineSaveButton } from './OfflineManager';
 import { getChapterEdits } from '@/lib/supabase-sync';
+import { getOfflineChapter } from '@/lib/offline-cache';
 import {
   Chapter,
   Series,
@@ -41,10 +44,10 @@ interface WebtoonReaderProps {
 }
 
 const EDIT_LANGUAGES = [
-  { code: 'en', label: 'EN' },
-  { code: 'ml', label: 'ML' },
-  { code: 'hi', label: 'HI' },
-  { code: 'ta', label: 'TA' },
+  { code: 'en', label: 'English' },
+  { code: 'ml', label: 'Malayalam (മലയാളം)' },
+  { code: 'hi', label: 'Hindi (हिन्दी)' },
+  { code: 'ta', label: 'Tamil (தமிழ்)' },
 ];
 
 export function WebtoonReader({
@@ -61,7 +64,7 @@ export function WebtoonReader({
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [isPinAdmin, setIsPinAdmin] = useState(false);
 
-  // Pre-saved Studio Chapter Edits state (Zero-lag reader overlays)
+  // Pre-saved Studio Chapter Edits state (Zero-lag reader translations)
   const [editsByLang, setEditsByLang] = useState<Record<string, ChapterEditsData>>({});
   const [activeEditLang, setActiveEditLang] = useState<string>('en');
   const [showTranslatedOverlay, setShowTranslatedOverlay] = useState(true);
@@ -112,6 +115,7 @@ export function WebtoonReader({
           if (data && Array.isArray(data.pages) && data.pages.length > 0) {
             const hasContent = data.pages.some(
               (p) =>
+                Boolean(p.bakedImageUrl) ||
                 (Array.isArray(p.speechBubbles) && p.speechBubbles.length > 0) ||
                 (Array.isArray(p.panelCuts) && p.panelCuts.length > 0)
             );
@@ -121,6 +125,12 @@ export function WebtoonReader({
           }
         })
       );
+      if (Object.keys(found).length === 0) {
+        const offlineRecord = await getOfflineChapter(chapter.id);
+        if (offlineRecord?.editsByLang) {
+          Object.assign(found, offlineRecord.editsByLang);
+        }
+      }
       if (!isMounted) return;
       setEditsByLang(found);
       const availableCodes = Object.keys(found);
@@ -138,11 +148,8 @@ export function WebtoonReader({
   const availableLangCodes = useMemo(() => Object.keys(editsByLang), [editsByLang]);
 
   const hasSpeechBubbles = useMemo(() => {
-    if (!activeEdits) return false;
-    return activeEdits.pages.some(
-      (p) => Array.isArray(p.speechBubbles) && p.speechBubbles.length > 0
-    );
-  }, [activeEdits]);
+    return availableLangCodes.length > 0;
+  }, [availableLangCodes]);
 
   const orderedGuidedPanels = useMemo(() => {
     if (!activeEdits) return [];
@@ -164,21 +171,61 @@ export function WebtoonReader({
 
   const hasPanelCuts = orderedGuidedPanels.length > 0;
 
+  const currentPageRef = useRef(currentPage);
+  currentPageRef.current = currentPage;
+
+  // requestAnimationFrame-throttled scroll listener for 60fps/120fps smooth mobile scrolling
   useEffect(() => {
-    const handleScroll = () => {
-      const panels = document.querySelectorAll('[data-page-number]');
+    let rafId: number | null = null;
+
+    const updateActivePage = () => {
+      const container = containerRef.current;
+      const panels = (container || document).querySelectorAll<HTMLElement>('[data-page-number]');
+      if (!panels.length) {
+        rafId = null;
+        return;
+      }
+
+      const viewportCenter = window.innerHeight * 0.5;
       let active = 1;
-      panels.forEach((panel) => {
+
+      // Sequential early-exit: once a panel top is below the viewport center,
+      // all subsequent panels in continuous vertical scroll are lower down
+      for (let i = 0; i < panels.length; i++) {
+        const panel = panels[i];
         const rect = panel.getBoundingClientRect();
-        if (rect.top <= window.innerHeight * 0.5) {
-          active = Number(panel.getAttribute('data-page-number') || 1);
+
+        if (rect.top <= viewportCenter) {
+          active = Number(panel.getAttribute('data-page-number') || (i + 1));
+        } else {
+          break;
         }
-      });
-      setCurrentPage(active);
+      }
+
+      // Avoid unnecessary re-renders while scrolling inside the same panel
+      if (active !== currentPageRef.current) {
+        currentPageRef.current = active;
+        setCurrentPage(active);
+      }
+
+      rafId = null;
+    };
+
+    const handleScroll = () => {
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(updateActivePage);
+      }
     };
 
     window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => window.removeEventListener('scroll', handleScroll);
+    handleScroll();
+
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
   }, []);
 
   const progressPercent = Math.round(
@@ -234,62 +281,68 @@ export function WebtoonReader({
           hudVisible ? 'translate-y-0' : '-translate-y-full'
         }`}
       >
-        <div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-4 gap-3">
-          <div className="flex items-center gap-3 min-w-0">
+        <div className="mx-auto flex h-13 sm:h-14 max-w-4xl items-center justify-between px-2.5 sm:px-4 gap-1.5 sm:gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
             <Link
               href={`/series/${seriesSlug}`}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white transition-colors"
+              className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white transition-colors"
             >
               <ArrowLeft className="h-4 w-4" />
             </Link>
-            <div className="min-w-0">
-              <p className="truncate text-xs text-slate-400">{seriesTitle}</p>
-              <h1 className="truncate text-sm font-bold text-white">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[11px] sm:text-xs text-slate-400 leading-tight">
+                {seriesTitle}
+              </p>
+              <h1 className="truncate text-xs sm:text-sm font-bold text-white leading-tight">
                 {displayHeading}
               </h1>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {/* Zero-Lag Pre-Saved Translation Overlay Toggle (Only shown when chapter_edits exist) */}
-            {hasSpeechBubbles && (
-              <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-xs">
-                <button
-                  onClick={() => setShowTranslatedOverlay(false)}
-                  className={`rounded-md px-2 py-1 font-medium transition-colors cursor-pointer ${
-                    !showTranslatedOverlay
-                      ? 'bg-zinc-800 text-white'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            {/* Language Switcher for Ordinary Users */}
+            <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-1.5 sm:px-2.5 h-8 sm:h-9 text-xs">
+              <Languages className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+              <select
+                value={showTranslatedOverlay && hasSpeechBubbles ? activeEditLang : 'original'}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'original') {
+                    setShowTranslatedOverlay(false);
+                  } else {
+                    setActiveEditLang(val);
+                    setShowTranslatedOverlay(true);
+                  }
+                }}
+                aria-label="Select Reading Language"
+                className="w-[74px] sm:w-auto max-w-[82px] sm:max-w-[150px] truncate bg-transparent text-[11px] sm:text-xs font-semibold text-white focus:outline-none cursor-pointer"
+              >
+                <option value="original" className="bg-zinc-900 text-white">
                   Original
-                </button>
-                <button
-                  onClick={() => setShowTranslatedOverlay(true)}
-                  className={`flex items-center gap-1 rounded-md px-2 py-1 font-semibold transition-colors cursor-pointer ${
-                    showTranslatedOverlay
-                      ? 'bg-rose-600 text-white'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Languages className="h-3 w-3" />
-                  <span>Translated</span>
-                </button>
-                {availableLangCodes.length > 1 && showTranslatedOverlay && (
-                  <select
-                    value={activeEditLang}
-                    onChange={(e) => setActiveEditLang(e.target.value)}
-                    className="ml-1 bg-transparent pr-1 font-mono text-[11px] font-bold text-rose-300 focus:outline-none"
-                  >
-                    {availableLangCodes.map((code) => (
-                      <option key={code} value={code} className="bg-zinc-900 text-white">
-                        {code.toUpperCase()}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            )}
+                </option>
+                {EDIT_LANGUAGES.map((lang) => {
+                  const isReady = Boolean(editsByLang[lang.code]);
+                  return (
+                    <option
+                      key={lang.code}
+                      value={lang.code}
+                      disabled={!isReady}
+                      className="bg-zinc-900 text-white"
+                    >
+                      {lang.label} {isReady ? '✓' : '—'}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            {/* Automatic 5-Chapter LRU Cache + Manual Save Offline Button */}
+            <OfflineSaveButton
+              chapter={chapter}
+              series={series}
+              editsByLang={editsByLang}
+              autoCacheOnMount
+            />
 
             {/* Guided Panel-by-Panel Mode Toggle (Only shown when panelCuts exist) */}
             {hasPanelCuts && (
@@ -298,7 +351,7 @@ export function WebtoonReader({
                   setGuidedPanelMode((prev) => !prev);
                   setActiveGuidedIndex(0);
                 }}
-                className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors cursor-pointer ${
+                className={`flex h-8 sm:h-9 items-center gap-1.5 rounded-lg border px-2 sm:px-2.5 text-xs font-semibold transition-colors cursor-pointer shrink-0 ${
                   guidedPanelMode
                     ? 'border-indigo-500/50 bg-indigo-600 text-white'
                     : 'border-zinc-800 bg-zinc-900 text-slate-300 hover:text-white'
@@ -306,7 +359,7 @@ export function WebtoonReader({
                 title="Toggle Guided Panel-by-Panel View"
               >
                 <Layers className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">
+                <span className="hidden md:inline">
                   {guidedPanelMode ? 'Panel View' : 'Full Strip'}
                 </span>
               </button>
@@ -316,17 +369,18 @@ export function WebtoonReader({
             {canAccessStudio && (
               <Link
                 href={`/studio?seriesId=${encodeURIComponent(seriesId)}&chapterId=${encodeURIComponent(chapter.id)}`}
-                className="flex h-9 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition-colors"
-                title="Open in Admin Translation & Panel Cut Studio"
+                className="flex h-8 sm:h-9 items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2 sm:px-2.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition-colors shrink-0"
+                title="Open in Admin Translation Studio"
               >
                 <Sparkles className="h-3.5 w-3.5 text-rose-400" />
-                <span className="hidden sm:inline">Studio</span>
+                <span className="hidden md:inline">Studio</span>
               </Link>
             )}
 
             <button
               onClick={() => setCommentsOpen(true)}
-              className="flex h-9 items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 text-xs font-medium text-slate-200 hover:border-zinc-700 cursor-pointer"
+              className="flex h-8 sm:h-9 items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2 sm:px-3 text-xs font-medium text-slate-200 hover:border-zinc-700 cursor-pointer shrink-0"
+              title="Comments"
             >
               <MessageSquare className="h-3.5 w-3.5 text-rose-500" />
               <span className="hidden md:inline">Comments</span>
@@ -413,19 +467,15 @@ export function WebtoonReader({
               const pageEdits = activeEdits?.pages.find(
                 (p) => p.pageIndex === idx
               );
-              const bubbles =
-                showTranslatedOverlay && pageEdits?.speechBubbles
-                  ? pageEdits.speechBubbles
-                  : [];
+              const bubbles = pageEdits?.speechBubbles || [];
 
               return (
                 <div
                   key={page.pageNumber || idx}
                   data-page-number={page.pageNumber}
-                  style={{ containerType: 'inline-size' }}
                   className="relative w-full bg-zinc-950"
                 >
-                  <ResilientImage
+                  <TranslatedPanelImage
                     src={page.imageUrl}
                     alt={page.caption || `Page ${page.pageNumber}`}
                     className="w-full h-auto block"
@@ -435,30 +485,11 @@ export function WebtoonReader({
                     chapterNumber={chapterNumber}
                     pageNumber={page.pageNumber}
                     priority={idx < 2}
+                    bubbles={bubbles}
+                    languageCode={activeEditLang}
+                    showTranslated={showTranslatedOverlay}
+                    preBakedUrl={pageEdits?.bakedImageUrl}
                   />
-
-                  {/* Zero-Lag Pre-Computed Speech Bubble Overlays */}
-                  {bubbles.map((bubble) => (
-                    <div
-                      key={bubble.id}
-                      style={{
-                        left: `${bubble.box.xPercent}%`,
-                        top: `${bubble.box.yPercent}%`,
-                        width: `${bubble.box.wPercent}%`,
-                        height: `${bubble.box.hPercent}%`,
-                        backgroundColor: bubble.backgroundColor || '#ffffff',
-                        color: bubble.textColor || '#09090b',
-                        fontSize: `clamp(9px, ${(
-                          (bubble.fontSize || 14) * 0.18
-                        ).toFixed(2)}cqw, 26px)`,
-                      }}
-                      className="pointer-events-none absolute z-20 flex items-center justify-center rounded-md p-1 text-center font-bold leading-tight shadow-sm overflow-hidden break-words"
-                    >
-                      <span className="w-full break-words">
-                        {bubble.translatedText || bubble.originalText}
-                      </span>
-                    </div>
-                  ))}
                 </div>
               );
             })}
@@ -523,8 +554,8 @@ export function WebtoonReader({
           hudVisible ? 'translate-y-0' : 'translate-y-full'
         }`}
       >
-        <div className="mx-auto flex h-12 max-w-4xl items-center justify-between px-4 gap-3">
-          <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
+        <div className="mx-auto flex h-12 max-w-4xl items-center justify-between px-3 sm:px-4 gap-2 sm:gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-2 text-[11px] sm:text-xs font-mono text-slate-400 whitespace-nowrap shrink-0">
             <span>
               PANEL {currentPage} / {pages.length}
             </span>
@@ -541,7 +572,7 @@ export function WebtoonReader({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
             {prevChapterId && (
               <Link
                 href={`/read/${prevChapterId}`}
@@ -569,9 +600,10 @@ export function WebtoonReader({
             </button>
             <button
               onClick={() => setHudVisible(false)}
-              className="flex h-8 items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 text-xs text-slate-400 hover:text-white cursor-pointer"
+              className="flex h-8 items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2 sm:px-2.5 text-[11px] sm:text-xs text-slate-400 hover:text-white cursor-pointer whitespace-nowrap"
             >
-              <EyeOff className="h-3.5 w-3.5" /> Hide HUD
+              <EyeOff className="h-3.5 w-3.5 shrink-0" />
+              <span>Hide HUD</span>
             </button>
           </div>
         </div>

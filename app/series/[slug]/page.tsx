@@ -26,6 +26,10 @@ import {
   PersistedSeriesRecord,
   PersistedChapterRecord,
 } from '@/lib/supabase-sync';
+import {
+  getAllOfflineChapters,
+  OfflineChapterSummary,
+} from '@/lib/offline-cache';
 import { Series, Chapter } from '@/lib/types';
 
 export default function SeriesDetailPage() {
@@ -38,8 +42,23 @@ export default function SeriesDetailPage() {
   const [baseChapters, setBaseChapters] = useState<Chapter[]>([]);
   const [firestoreSeries, setFirestoreSeries] = useState<PersistedSeriesRecord[]>([]);
   const [firestoreChapters, setFirestoreChapters] = useState<PersistedChapterRecord[]>([]);
+  const [offlineChapters, setOfflineChapters] = useState<OfflineChapterSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [copiedLink, setCopiedLink] = useState(false);
+
+  useEffect(() => {
+    const syncOffline = () => {
+      getAllOfflineChapters()
+        .then(setOfflineChapters)
+        .catch(() => {});
+    };
+    syncOffline();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('panelverse-offline-updated', syncOffline);
+      return () =>
+        window.removeEventListener('panelverse-offline-updated', syncOffline);
+    }
+  }, []);
 
   useEffect(() => {
     if (!slug) return;
@@ -312,50 +331,65 @@ export default function SeriesDetailPage() {
           </div>
 
           <div className="flex flex-col divide-y divide-slate-800/80 rounded-xl border border-slate-800 bg-slate-900/40">
-            {chapters.map((ch) => (
-              <Link
-                key={ch.id}
-                href={`/read/${ch.id}`}
-                className="group flex items-center justify-between p-4 transition-colors hover:bg-slate-800/50"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-800/80 text-xs font-mono font-bold text-rose-400 group-hover:bg-rose-600 group-hover:text-white transition-colors tabular-nums">
-                    {ch.chapterNumber}
-                  </div>
-                  <div>
-                    <h3 className="text-xs sm:text-sm font-semibold text-slate-100 group-hover:text-rose-400 transition-colors">
-                      {ch.title}
-                    </h3>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                      <span>{ch.releaseDate}</span>
-                      <span aria-hidden="true">·</span>
-                      <span className="font-mono tabular-nums text-slate-400">
-                        {ch.pagesCount || ch.pages?.length || 18} pages
-                      </span>
-                      {ch.language && (
-                        <>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-mono uppercase text-rose-400/90">
-                            {ch.language}
-                          </span>
-                        </>
-                      )}
-                      <span aria-hidden="true">·</span>
-                      <span className="font-mono tabular-nums">
-                        {ch.views.toLocaleString('en-US')} reads
-                      </span>
+            {chapters.map((ch) => {
+              const offlineInfo = offlineChapters.find(
+                (o) => o.chapterId === ch.id
+              );
+              return (
+                <Link
+                  key={ch.id}
+                  href={`/read/${ch.id}`}
+                  className="group flex items-center justify-between p-4 transition-colors hover:bg-slate-800/50"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-800/80 text-xs font-mono font-bold text-rose-400 group-hover:bg-rose-600 group-hover:text-white transition-colors tabular-nums">
+                      {ch.chapterNumber}
+                    </div>
+                    <div>
+                      <h3 className="text-xs sm:text-sm font-semibold text-slate-100 group-hover:text-rose-400 transition-colors">
+                        {ch.title}
+                      </h3>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                        <span>{ch.releaseDate}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono tabular-nums text-slate-400">
+                          {ch.pagesCount || ch.pages?.length || 18} pages
+                        </span>
+                        {ch.language && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-mono uppercase text-rose-400/90">
+                              {ch.language}
+                            </span>
+                          </>
+                        )}
+                        {offlineInfo && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-semibold text-emerald-400">
+                              {offlineInfo.isPinned
+                                ? 'Saved Offline'
+                                : 'Auto-Cached'}
+                            </span>
+                          </>
+                        )}
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono tabular-nums">
+                          {ch.views.toLocaleString('en-US')} reads
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium text-slate-400 group-hover:text-slate-200 transition-colors whitespace-nowrap shrink-0">
-                    Stream & Read
-                  </span>
-                  <ChevronRight className="h-4 w-4 text-slate-500 group-hover:text-rose-400 transition-colors" />
-                </div>
-              </Link>
-            ))}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-400 group-hover:text-slate-200 transition-colors whitespace-nowrap shrink-0">
+                      {offlineInfo ? 'Read Offline' : 'Stream & Read'}
+                    </span>
+                    <ChevronRight className="h-4 w-4 text-slate-500 group-hover:text-rose-400 transition-colors" />
+                  </div>
+                </Link>
+              );
+            })}
           </div>
         </section>
       </main>

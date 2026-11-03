@@ -11,6 +11,7 @@ import {
   subscribeLibraryChaptersFromFirestore,
   PersistedChapterRecord,
 } from '@/lib/supabase-sync';
+import { getOfflineChapter } from '@/lib/offline-cache';
 import { Chapter, Series } from '@/lib/types';
 
 export default function ReaderPage() {
@@ -19,7 +20,7 @@ export default function ReaderPage() {
 
   const { id: userId, username, isAuthReady, isAdmin } = useIdentity();
   const [baseChapter, setBaseChapter] = useState<
-    (Chapter & { series?: Series; prevChapterId?: string; nextChapterId?: string }) | null
+    (Chapter & { series?: Series; prevChapterId?: string | null; nextChapterId?: string | null }) | null
   >(null);
   const [firestoreChapters, setFirestoreChapters] = useState<PersistedChapterRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -40,6 +41,13 @@ export default function ReaderPage() {
           setBaseChapter(data);
         }
       } catch (err: unknown) {
+        // Fallback to IndexedDB Offline Cache when offline or network fails
+        const offlineRecord = await getOfflineChapter(chapterId);
+        if (offlineRecord?.chapter && isMounted) {
+          setBaseChapter(offlineRecord.chapter);
+          setError(null);
+          return;
+        }
         const e = err as Error;
         if (isMounted) {
           setError(e.message || 'Failed to load chapter');
